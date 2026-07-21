@@ -67,7 +67,7 @@ function saveState(){
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
       theme: STATE.theme, fontSize: STATE.fontSize, indent: STATE.indent, restoreTabs: STATE.restoreTabs,
       favorites: STATE.favorites,
-      openTabs: STATE.restoreTabs ? STATE.openTabs.map(t=>({id:t.id, toolId:t.toolId})) : [],
+      openTabs: STATE.restoreTabs ? STATE.openTabs.map(t=>({id:t.id, toolId:t.toolId, title:t.title, clone:t.clone||false})) : [],
       activeTabId: STATE.restoreTabs ? STATE.activeTabId : null,
       sidebarCollapsed: STATE.sidebarCollapsed
     }));
@@ -132,14 +132,42 @@ function toggleFavorite(toolId){
 function openTool(toolId){
   const tool = toolById(toolId);
   if (!tool) return;
-  // Reuse existing tab for this tool (single-instance-per-click UX; duplicate via right side not required by MVP)
-  let tab = STATE.openTabs.find(t=>t.toolId===toolId && t._singleton !== false);
+  // Reuse the original (non-cloned) tab for this tool if one is open; clones are always independent.
+  let tab = STATE.openTabs.find(t=>t.toolId===toolId && !t.clone);
   if (!tab){
     tab = {id: uid(), toolId, title: tool.name};
     STATE.openTabs.push(tab);
   }
   setActiveTab(tab.id);
   saveState();
+}
+function duplicateTab(tabId){
+  const srcTab = STATE.openTabs.find(t=>t.id===tabId);
+  const tool = srcTab && toolById(srcTab.toolId);
+  if (!srcTab || !tool) return;
+  const inst = ensurePaneMounted(srcTab);
+  let snapshot = null;
+  if (inst.getState){ try{ snapshot = inst.getState(); }catch(e){ /* clone will just open a fresh instance */ } }
+  const baseTitle = (srcTab.title || tool.name).replace(/ \(copy( \d+)?\)$/, '');
+  const newTab = {id: uid(), toolId: srcTab.toolId, title: baseTitle + ' (copy)', clone:true};
+  const srcIdx = STATE.openTabs.indexOf(srcTab);
+  STATE.openTabs.splice(srcIdx+1, 0, newTab);
+  setActiveTab(newTab.id);
+  if (snapshot){
+    const newInst = openInstances[newTab.id];
+    if (newInst && newInst.setState){ try{ newInst.setState(snapshot); }catch(e){} }
+  }
+  saveState();
+  toast('Tab duplicated','ok');
+}
+function renameTab(tabId){
+  const tab = STATE.openTabs.find(t=>t.id===tabId);
+  const tool = tab && toolById(tab.toolId);
+  if (!tab) return;
+  const name = prompt('Rename tab:', tab.title || (tool?tool.name:'Tool'));
+  if (!name) return;
+  tab.title = name.trim();
+  renderTabbar(); saveState();
 }
 function closeTab(tabId, evt){
   if (evt) evt.stopPropagation();
@@ -169,9 +197,11 @@ function renderTabbar(){
     const tEl = el('div',{class:'tab'+(tab.id===STATE.activeTabId?' active':'')},
       el('span',{},tool? tool.icon : '?'),
       el('span',{}, tab.title || (tool?tool.name:'Tool')),
+      el('span',{class:'x', title:'Duplicate tab', onclick:(e)=>{e.stopPropagation(); duplicateTab(tab.id);}}, '\u29C9'),
       el('span',{class:'x', onclick:(e)=>closeTab(tab.id,e)}, '\u2715')
     );
     tEl.addEventListener('click', ()=>setActiveTab(tab.id));
+    tEl.addEventListener('dblclick', ()=>renameTab(tab.id));
     bar.appendChild(tEl);
   }
   $('#sb-tabs-count').textContent = STATE.openTabs.length + (STATE.openTabs.length===1?' tab open':' tabs open');
@@ -181,9 +211,9 @@ function ensurePaneMounted(tab){
   const tool = toolById(tab.toolId);
   const pane = el('div',{class:'tool-pane', id:'pane-'+tab.id});
   $('#workspace').appendChild(pane);
-  let cleanup = null;
+  let result = null;
   try{
-    cleanup = tool.mount(pane, {
+    result = tool.mount(pane, {
       setStatus: (text, ok=null)=>{ if (tab.id===STATE.activeTabId) setStatus(text, ok); },
       setTitle: (title)=>{ tab.title = title; renderTabbar(); }
     }) || null;
@@ -191,7 +221,9 @@ function ensurePaneMounted(tab){
     pane.innerHTML = `<div class="empty-state"><div class="glyph">&#9888;</div><h3>Tool failed to load</h3><p>${escapeHtml(e.message||String(e))}</p></div>`;
     console.error(e);
   }
-  openInstances[tab.id] = {toolId: tab.toolId, container: pane, cleanup};
+  // mount() may return a bare cleanup function (legacy) or {cleanup, getState, setState} for clone support
+  const normalized = typeof result === 'function' ? {cleanup: result} : (result || {});
+  openInstances[tab.id] = {toolId: tab.toolId, container: pane, cleanup: normalized.cleanup||null, getState: normalized.getState||null, setState: normalized.setState||null};
   return openInstances[tab.id];
 }
 function renderActivePane(){
@@ -647,7 +679,10 @@ registerTool({
     container._importText = (text, name)=>{ cm.setValue(text); api.setTitle(name); tryParse(); };
     tryParse();
     setTimeout(()=>cm.refresh(), 30);
-    return ()=>{};
+    return {
+      getState: ()=>({value: cm.getValue(), path: container.querySelector('#json-path').value}),
+      setState: (s)=>{ cm.setValue(s.value||''); container.querySelector('#json-path').value = s.path||''; tryParse(); runPath(); }
+    };
   }
 });
 
@@ -766,7 +801,10 @@ registerTool({
     container._importText = (text,name)=>{ cm.setValue(text); api.setTitle(name); tryParse(); };
     tryParse();
     setTimeout(()=>cm.refresh(),30);
-    return ()=>{};
+    return {
+      getState: ()=>({value: cm.getValue(), path: container.querySelector('#xml-path').value}),
+      setState: (s)=>{ cm.setValue(s.value||''); container.querySelector('#xml-path').value = s.path||''; tryParse(); runPath(); }
+    };
   }
 });
 
@@ -846,7 +884,10 @@ registerTool({
     container._importText = (text,name)=>{ cm.setValue(text); api.setTitle(name); };
     api.setStatus('Ready');
     setTimeout(()=>cm.refresh(),30);
-    return ()=>{};
+    return {
+      getState: ()=>({value: cm.getValue(), dialect: container.querySelector('#sql-dialect').value}),
+      setState: (s)=>{ cm.setValue(s.value||''); if (s.dialect) container.querySelector('#sql-dialect').value = s.dialect; }
+    };
   }
 });
 
@@ -906,7 +947,15 @@ registerTool({
     container.querySelector('#diff-a').value = '{\n  "name": "toolkit",\n  "version": "1.0.0",\n  "private": true\n}';
     container.querySelector('#diff-b').value = '{\n  "name": "toolkit",\n  "version": "1.1.0",\n  "private": true,\n  "license": "MIT"\n}';
     run();
-    return ()=>{};
+    return {
+      getState: ()=>({a:container.querySelector('#diff-a').value, b:container.querySelector('#diff-b').value,
+        json:container.querySelector('#diff-json').checked, ws:container.querySelector('#diff-ws').checked}),
+      setState: (s)=>{
+        container.querySelector('#diff-a').value = s.a||''; container.querySelector('#diff-b').value = s.b||'';
+        container.querySelector('#diff-json').checked = !!s.json; container.querySelector('#diff-ws').checked = !!s.ws;
+        run();
+      }
+    };
   }
 });
 
@@ -1006,7 +1055,15 @@ registerTool({
     });
     container._importText = (text,name)=>{ container.querySelector('#dc-in').value = text; api.setTitle(name); };
     convert();
-    return ()=>{};
+    return {
+      getState: ()=>({input:container.querySelector('#dc-in').value, from:container.querySelector('#dc-from').value, to:container.querySelector('#dc-to').value}),
+      setState: (s)=>{
+        container.querySelector('#dc-in').value = s.input||'';
+        if (s.from) container.querySelector('#dc-from').value = s.from;
+        if (s.to) container.querySelector('#dc-to').value = s.to;
+        convert();
+      }
+    };
   }
 });
 
@@ -1067,7 +1124,10 @@ registerTool({
     }
     container.querySelector('#jwt-in').addEventListener('input', debounce(decode, 150));
     container._importText = (text)=>{ container.querySelector('#jwt-in').value=text.trim(); decode(); };
-    return ()=>{};
+    return {
+      getState: ()=>({token: container.querySelector('#jwt-in').value}),
+      setState: (s)=>{ container.querySelector('#jwt-in').value = s.token||''; decode(); }
+    };
   }
 });
 
@@ -1110,7 +1170,10 @@ registerTool({
       r.readAsDataURL(f);
     });
     container._importText = (text)=>{ plain.value = text; encode(); };
-    return ()=>{};
+    return {
+      getState: ()=>({plain: plain.value, encoded: enc.value}),
+      setState: (s)=>{ plain.value = s.plain||''; enc.value = s.encoded||''; }
+    };
   }
 });
 
@@ -1178,7 +1241,10 @@ registerTool({
     raw.value = 'https://example.com/search?q=hello world&page=1&sort=relevance';
     encode();
     container._importText = (text)=>{ raw.value=text; encode(); };
-    return ()=>{};
+    return {
+      getState: ()=>({raw: raw.value, component: component.checked}),
+      setState: (s)=>{ raw.value = s.raw||''; component.checked = !!s.component; encode(); }
+    };
   }
 });
 
@@ -1247,7 +1313,13 @@ registerTool({
     container.querySelector('#rx-pattern').value = '\\b[A-Z][a-z]+\\b';
     container.querySelector('#rx-text').value = 'Ada Lovelace and Grace Hopper pioneered early Computing.';
     run();
-    return ()=>{};
+    return {
+      getState: ()=>({pattern:container.querySelector('#rx-pattern').value, flags:container.querySelector('#rx-flags').value, text:container.querySelector('#rx-text').value}),
+      setState: (s)=>{
+        container.querySelector('#rx-pattern').value = s.pattern||''; container.querySelector('#rx-flags').value = s.flags||'g'; container.querySelector('#rx-text').value = s.text||'';
+        run();
+      }
+    };
   }
 });
 
@@ -1316,7 +1388,15 @@ registerTool({
       copyText(ids.join('\n'), `${ids.length} UUIDs copied`);
     });
     gen();
-    return ()=>{};
+    return {
+      getState: ()=>({version:container.querySelector('#uuid-version').value, count:container.querySelector('#uuid-count').value,
+        upper:container.querySelector('#uuid-upper').checked, hyphen:container.querySelector('#uuid-hyphen').checked}),
+      setState: (s)=>{
+        container.querySelector('#uuid-version').value = s.version||'v4'; container.querySelector('#uuid-count').value = s.count||5;
+        container.querySelector('#uuid-upper').checked = !!s.upper; container.querySelector('#uuid-hyphen').checked = s.hyphen!==false;
+        gen();
+      }
+    };
   }
 });
 
@@ -1352,7 +1432,10 @@ registerTool({
     });
     container.querySelector('#hash-in').value = 'Toolbench';
     run();
-    return ()=>{};
+    return {
+      getState: ()=>({input: container.querySelector('#hash-in').value}),
+      setState: (s)=>{ container.querySelector('#hash-in').value = s.input||''; run(); }
+    };
   }
 });
 
@@ -1410,7 +1493,11 @@ registerTool({
     container.querySelector('#ts-live').textContent = Math.floor(Date.now()/1000)+'  ·  '+new Date().toLocaleTimeString();
     fillFrom(new Date());
     api.setStatus('Ready');
-    return ()=>clearInterval(liveTimer);
+    return {
+      cleanup: ()=>clearInterval(liveTimer),
+      getState: ()=>({iso: container.querySelector('#ts-iso').value}),
+      setState: (s)=>{ if (s.iso) fillFrom(new Date(s.iso)); }
+    };
   }
 });
 
@@ -2052,5 +2139,912 @@ registerTool({
 
     container._importText = (text, name)=>{ createNote(null); activeNote.title = name.replace(/\.[^.]+$/,''); activeNote.content = text; renderEditArea(); };
     return ()=>{ closeHint(); };
+  }
+});
+
+/* =========================================================================
+   TOOL: Number Base Converter
+   ========================================================================= */
+registerTool({
+  id:'numbase-tool', name:'Number Base Converter', category:'Developer Utilities', icon:'01',
+  mount(container, api){
+    container.innerHTML = `
+      <div class="tool-shell">
+        <div class="tool-toolbar"><span style="font-size:12px;color:var(--text-dim)">Enter a value in any base — the others update live. Non-negative integers only.</span></div>
+        <div class="err-banner" id="nb-err"></div>
+        <div class="stack" style="padding:14px;max-width:560px">
+          <div class="field-row" style="padding:8px 0"><label style="min-width:70px">Decimal</label><input class="mini grow" id="nb-dec" style="font-family:var(--mono)"></div>
+          <div class="field-row" style="padding:8px 0"><label style="min-width:70px">Hex</label><input class="mini grow" id="nb-hex" style="font-family:var(--mono)"></div>
+          <div class="field-row" style="padding:8px 0"><label style="min-width:70px">Octal</label><input class="mini grow" id="nb-oct" style="font-family:var(--mono)"></div>
+          <div class="field-row" style="padding:8px 0"><label style="min-width:70px">Binary</label><input class="mini grow" id="nb-bin" style="font-family:var(--mono);word-break:break-all"></div>
+        </div>
+      </div>`;
+    const dec=container.querySelector('#nb-dec'), hex=container.querySelector('#nb-hex'), oct=container.querySelector('#nb-oct'), bin=container.querySelector('#nb-bin');
+    const bnr = container.querySelector('#nb-err');
+    function setAllFrom(value, skip){
+      try{
+        if (value==='' || value==null){ [dec,hex,oct,bin].forEach(i=>i.value=''); bnr.classList.remove('show'); return; }
+        const n = BigInt(value);
+        if (n<0n) throw new Error('Negative numbers are not supported');
+        if (skip!==dec) dec.value = n.toString(10);
+        if (skip!==hex) hex.value = n.toString(16).toUpperCase();
+        if (skip!==oct) oct.value = n.toString(8);
+        if (skip!==bin) bin.value = n.toString(2);
+        bnr.classList.remove('show'); api.setStatus('Valid', true);
+      }catch(e){ bnr.textContent = 'Invalid number for this base'; bnr.classList.add('show'); api.setStatus('Invalid input', false); }
+    }
+    dec.addEventListener('input', ()=>{ try{ setAllFrom(dec.value===''?'':BigInt(dec.value||0), dec); }catch(e){ bnr.textContent='Invalid decimal'; bnr.classList.add('show'); } });
+    hex.addEventListener('input', ()=>{ try{ setAllFrom(hex.value===''?'':BigInt('0x'+(hex.value.replace(/^0x/i,'')||'0')), hex); }catch(e){ bnr.textContent='Invalid hex'; bnr.classList.add('show'); } });
+    oct.addEventListener('input', ()=>{ try{ setAllFrom(oct.value===''?'':BigInt('0o'+(oct.value.replace(/^0o/i,'')||'0')), oct); }catch(e){ bnr.textContent='Invalid octal'; bnr.classList.add('show'); } });
+    bin.addEventListener('input', ()=>{ try{ setAllFrom(bin.value===''?'':BigInt('0b'+(bin.value.replace(/^0b/i,'')||'0')), bin); }catch(e){ bnr.textContent='Invalid binary'; bnr.classList.add('show'); } });
+    dec.value = '255'; setAllFrom(255n, dec);
+    return {
+      getState: ()=>({dec:dec.value}),
+      setState: (s)=>{ dec.value = s.dec||''; try{ setAllFrom(dec.value===''?'':BigInt(dec.value||0), dec); }catch(e){} }
+    };
+  }
+});
+
+/* =========================================================================
+   TOOL: Text Case Converter
+   ========================================================================= */
+registerTool({
+  id:'textcase-tool', name:'Text Case Converter', category:'Developer Utilities', icon:'Aa',
+  mount(container, api){
+    container.innerHTML = `
+      <div class="tool-shell">
+        <textarea class="plain-textarea" id="tc-in" style="flex:0 0 90px" placeholder="Type or paste text — e.g. hello world example"></textarea>
+        <div class="stack" style="padding:10px 12px" id="tc-out"></div>
+      </div>`;
+    const CASES = [
+      ['camelCase', words=>words.map((w,i)=>i===0?w.toLowerCase():cap(w)).join('')],
+      ['PascalCase', words=>words.map(cap).join('')],
+      ['snake_case', words=>words.map(w=>w.toLowerCase()).join('_')],
+      ['kebab-case', words=>words.map(w=>w.toLowerCase()).join('-')],
+      ['CONSTANT_CASE', words=>words.map(w=>w.toUpperCase()).join('_')],
+      ['Title Case', words=>words.map(cap).join(' ')],
+      ['Sentence case', words=>words.length? cap(words[0])+' '+words.slice(1).map(w=>w.toLowerCase()).join(' ') : ''],
+      ['lowercase', words=>words.map(w=>w.toLowerCase()).join(' ')],
+      ['UPPERCASE', words=>words.map(w=>w.toUpperCase()).join(' ')],
+    ];
+    function cap(w){ return w? w[0].toUpperCase()+w.slice(1).toLowerCase() : w; }
+    function toWords(text){
+      return text
+        .replace(/([a-z0-9])([A-Z])/g,'$1 $2')
+        .split(/[\s_\-]+/)
+        .map(w=>w.trim()).filter(Boolean);
+    }
+    function run(){
+      const words = toWords(container.querySelector('#tc-in').value);
+      const out = container.querySelector('#tc-out'); out.innerHTML='';
+      CASES.forEach(([name,fn])=>{
+        const val = words.length ? fn(words) : '';
+        const row = el('div',{class:'hash-row'}, el('span',{class:'algo', style:'width:120px'}, name), el('span',{class:'val'}, val||'—'),
+          el('span',{class:'icon-btn', onclick:()=>copyText(val)}, '⧉'));
+        out.appendChild(row);
+      });
+      api.setStatus(words.length? `${words.length} words` : 'Ready');
+    }
+    container.querySelector('#tc-in').addEventListener('input', debounce(run,120));
+    container.querySelector('#tc-in').value = 'hello world example';
+    run();
+    return {
+      getState: ()=>({text: container.querySelector('#tc-in').value}),
+      setState: (s)=>{ container.querySelector('#tc-in').value = s.text||''; run(); }
+    };
+  }
+});
+
+/* =========================================================================
+   TOOL: Random Generator (passwords, strings, tokens, PINs)
+   ========================================================================= */
+registerTool({
+  id:'random-tool', name:'Random Generator', category:'Developer Utilities', icon:'\u2685',
+  mount(container, api){
+    container.innerHTML = `
+      <div class="tool-shell">
+        <div class="tool-toolbar">
+          <select class="mini" id="rg-kind">
+            <option value="password">Password</option>
+            <option value="string">Random string</option>
+            <option value="token">API token / secret (hex)</option>
+            <option value="pin">Numeric PIN</option>
+          </select>
+          <label>Length</label><input class="mini" id="rg-len" type="number" min="1" max="256" value="16" style="width:70px">
+          <label>Count</label><input class="mini" id="rg-count" type="number" min="1" max="100" value="5" style="width:70px">
+          <button class="btn primary" data-a="gen">Generate</button>
+          <button class="btn" data-a="copyall">Copy all</button>
+        </div>
+        <div class="field-row" id="rg-charsets">
+          <label class="toggle-row"><input type="checkbox" id="rg-lower" checked> a-z</label>
+          <label class="toggle-row"><input type="checkbox" id="rg-upper" checked> A-Z</label>
+          <label class="toggle-row"><input type="checkbox" id="rg-digits" checked> 0-9</label>
+          <label class="toggle-row"><input type="checkbox" id="rg-symbols"> symbols</label>
+          <label class="toggle-row"><input type="checkbox" id="rg-ambig"> exclude ambiguous (0O1lI)</label>
+        </div>
+        <div id="rg-strength" class="field-row"></div>
+        <div class="result-box" id="rg-out" style="font-size:13.5px;line-height:2"></div>
+      </div>`;
+    const AMBIG = /[0O1lI]/g;
+    function charset(){
+      let s = '';
+      if (container.querySelector('#rg-lower').checked) s += 'abcdefghijklmnopqrstuvwxyz';
+      if (container.querySelector('#rg-upper').checked) s += 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+      if (container.querySelector('#rg-digits').checked) s += '0123456789';
+      if (container.querySelector('#rg-symbols').checked) s += '!@#$%^&*()_+-=[]{}|;:,.<>?';
+      if (container.querySelector('#rg-ambig').checked) s = s.replace(AMBIG,'');
+      return s || 'abcdefghijklmnopqrstuvwxyz';
+    }
+    function randomFrom(set, len){
+      const arr = crypto.getRandomValues(new Uint32Array(len));
+      return Array.from(arr, x=>set[x % set.length]).join('');
+    }
+    function strengthBits(len, poolSize){ return Math.round(len * Math.log2(poolSize)); }
+    function gen(){
+      const kind = container.querySelector('#rg-kind').value;
+      const len = Math.max(1, Math.min(256, +container.querySelector('#rg-len').value||16));
+      const count = Math.max(1, Math.min(100, +container.querySelector('#rg-count').value||5));
+      container.querySelector('#rg-charsets').style.display = kind==='password'||kind==='string' ? 'flex' : 'none';
+      const out = container.querySelector('#rg-out'); out.innerHTML='';
+      let poolSize = 0;
+      for (let i=0;i<count;i++){
+        let val, pool;
+        if (kind==='password' || kind==='string'){ pool = charset(); poolSize = pool.length; val = randomFrom(pool, len); }
+        else if (kind==='pin'){ pool='0123456789'; poolSize=10; val = randomFrom(pool, len); }
+        else { const bytes = crypto.getRandomValues(new Uint8Array(Math.ceil(len/2))); val = Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('').slice(0,len); poolSize=16; }
+        const row = el('div',{style:'display:flex;gap:10px;align-items:center'}, el('span',{style:'flex:1;font-family:var(--mono)'}, val), el('span',{class:'icon-btn', onclick:()=>copyText(val)}, '⧉'));
+        out.appendChild(row);
+      }
+      const bits = strengthBits(len, poolSize||62);
+      const strengthEl = container.querySelector('#rg-strength');
+      const label = bits<40?'Weak':bits<64?'Moderate':bits<90?'Strong':'Very strong';
+      const color = bits<40?'var(--danger)':bits<64?'var(--warning)':'var(--success)';
+      strengthEl.innerHTML = `<span class="pill" style="background:${color}22;color:${color}">${label} · ~${bits} bits of entropy</span>`;
+      api.setStatus(`Generated ${count}`, true);
+    }
+    container.querySelector('[data-a="gen"]').addEventListener('click', gen);
+    container.querySelector('#rg-kind').addEventListener('change', gen);
+    ['#rg-lower','#rg-upper','#rg-digits','#rg-symbols','#rg-ambig'].forEach(sel=>container.querySelector(sel).addEventListener('change', gen));
+    container.querySelector('[data-a="copyall"]').addEventListener('click', ()=>{
+      const vals = [...container.querySelectorAll('#rg-out > div > span:first-child')].map(s=>s.textContent);
+      copyText(vals.join('\n'), `${vals.length} values copied`);
+    });
+    gen();
+    return {
+      getState: ()=>({kind:container.querySelector('#rg-kind').value, len:container.querySelector('#rg-len').value, count:container.querySelector('#rg-count').value,
+        lower:container.querySelector('#rg-lower').checked, upper:container.querySelector('#rg-upper').checked, digits:container.querySelector('#rg-digits').checked,
+        symbols:container.querySelector('#rg-symbols').checked, ambig:container.querySelector('#rg-ambig').checked}),
+      setState: (s)=>{
+        container.querySelector('#rg-kind').value = s.kind||'password'; container.querySelector('#rg-len').value = s.len||16; container.querySelector('#rg-count').value = s.count||5;
+        container.querySelector('#rg-lower').checked = !!s.lower; container.querySelector('#rg-upper').checked = !!s.upper; container.querySelector('#rg-digits').checked = !!s.digits;
+        container.querySelector('#rg-symbols').checked = !!s.symbols; container.querySelector('#rg-ambig').checked = !!s.ambig;
+        gen();
+      }
+    };
+  }
+});
+
+/* =========================================================================
+   TOOL: HTTP Status Code Reference
+   ========================================================================= */
+const HTTP_STATUSES = [
+  [100,'Continue','Interim response — the client should continue the request.'],
+  [101,'Switching Protocols','Server is switching protocols as requested (e.g. to WebSocket).'],
+  [200,'OK','Standard success response for GET/PUT/POST.'],
+  [201,'Created','Request succeeded and a new resource was created — typical POST response.'],
+  [202,'Accepted','Request accepted for processing but not yet completed.'],
+  [204,'No Content','Success with no response body — common for DELETE.'],
+  [206,'Partial Content','Range request fulfilled — used for resumable downloads/streaming.'],
+  [301,'Moved Permanently','Resource permanently moved to a new URL; clients should update links.'],
+  [302,'Found','Resource temporarily at a different URL.'],
+  [304,'Not Modified','Cached version is still valid — used with ETag / If-Modified-Since.'],
+  [307,'Temporary Redirect','Like 302 but guarantees the method/body are preserved.'],
+  [308,'Permanent Redirect','Like 301 but guarantees the method/body are preserved.'],
+  [400,'Bad Request','Malformed request syntax or invalid parameters.'],
+  [401,'Unauthorized','Authentication is required and has failed or not been provided.'],
+  [402,'Payment Required','Reserved for future use — occasionally used by APIs for billing.'],
+  [403,'Forbidden','Authenticated but not permitted to access this resource.'],
+  [404,'Not Found','The requested resource does not exist.'],
+  [405,'Method Not Allowed','HTTP method isn\u2019t supported for this resource.'],
+  [406,'Not Acceptable','Server can\u2019t produce a response matching the Accept headers.'],
+  [408,'Request Timeout','Server timed out waiting for the request.'],
+  [409,'Conflict','Request conflicts with the current state of the resource.'],
+  [410,'Gone','Resource used to exist but has been permanently removed.'],
+  [411,'Length Required','Content-Length header is required.'],
+  [413,'Payload Too Large','Request body exceeds server limits.'],
+  [414,'URI Too Long','The request URI is too long for the server to process.'],
+  [415,'Unsupported Media Type','Request payload format isn\u2019t supported.'],
+  [418,"I'm a teapot",'April Fools\u2019 joke from RFC 2324 — sometimes used intentionally in APIs.'],
+  [422,'Unprocessable Entity','Well-formed request but semantically invalid (common for validation errors).'],
+  [425,'Too Early','Server unwilling to process a request that might be replayed.'],
+  [429,'Too Many Requests','Client has sent too many requests — rate limiting.'],
+  [431,'Request Header Fields Too Large','Header section is too large.'],
+  [451,'Unavailable For Legal Reasons','Resource withheld for legal reasons.'],
+  [500,'Internal Server Error','Generic server-side failure.'],
+  [501,'Not Implemented','Server doesn\u2019t support the functionality required.'],
+  [502,'Bad Gateway','Upstream server returned an invalid response.'],
+  [503,'Service Unavailable','Server temporarily unable to handle the request (overload/maintenance).'],
+  [504,'Gateway Timeout','Upstream server failed to respond in time.'],
+  [505,'HTTP Version Not Supported','Server doesn\u2019t support the HTTP version used.'],
+  [507,'Insufficient Storage','Server unable to store the representation needed (WebDAV).'],
+  [511,'Network Authentication Required','Client needs to authenticate to gain network access.'],
+];
+registerTool({
+  id:'http-status-tool', name:'HTTP Status Reference', category:'Developer Utilities', icon:'#',
+  mount(container, api){
+    container.innerHTML = `
+      <div class="tool-shell">
+        <div class="tool-toolbar">
+          <input class="mini grow" id="hs-search" placeholder="Search code or description…">
+          <select class="mini" id="hs-cat">
+            <option value="">All categories</option>
+            <option value="1">1xx Informational</option>
+            <option value="2">2xx Success</option>
+            <option value="3">3xx Redirection</option>
+            <option value="4">4xx Client Error</option>
+            <option value="5">5xx Server Error</option>
+          </select>
+        </div>
+        <div class="result-box" id="hs-list" style="padding:0"></div>
+      </div>`;
+    function render(){
+      const q = container.querySelector('#hs-search').value.trim().toLowerCase();
+      const cat = container.querySelector('#hs-cat').value;
+      const list = container.querySelector('#hs-list'); list.innerHTML='';
+      const matches = HTTP_STATUSES.filter(([code,name,desc])=>
+        (!cat || String(code)[0]===cat) &&
+        (!q || String(code).includes(q) || name.toLowerCase().includes(q) || desc.toLowerCase().includes(q)));
+      matches.forEach(([code,name,desc])=>{
+        const color = code<300?'var(--success)':code<400?'var(--accent)':code<500?'var(--warning)':'var(--danger)';
+        const row = el('div',{style:'display:flex;gap:12px;padding:9px 14px;border-bottom:1px solid var(--border-soft);align-items:flex-start'},
+          el('span',{style:`font-weight:700;color:${color};min-width:44px;font-family:var(--mono)`}, code),
+          el('div',{style:'flex:1'}, el('div',{style:'font-weight:600'}, name), el('div',{style:'color:var(--text-secondary);font-size:12px;margin-top:2px'}, desc)),
+          el('span',{class:'icon-btn', onclick:()=>copyText(String(code))}, '⧉'));
+        list.appendChild(row);
+      });
+      api.setStatus(`${matches.length} status codes`);
+    }
+    container.querySelector('#hs-search').addEventListener('input', debounce(render,100));
+    container.querySelector('#hs-cat').addEventListener('change', render);
+    render();
+    return {
+      getState: ()=>({q:container.querySelector('#hs-search').value, cat:container.querySelector('#hs-cat').value}),
+      setState: (s)=>{ container.querySelector('#hs-search').value=s.q||''; container.querySelector('#hs-cat').value=s.cat||''; render(); }
+    };
+  }
+});
+
+/* =========================================================================
+   TOOL: Color Picker & Converter
+   ========================================================================= */
+registerTool({
+  id:'color-tool', name:'Color Picker & Converter', category:'Developer Utilities', icon:'\u25CF',
+  mount(container, api){
+    container.innerHTML = `
+      <div class="tool-shell">
+        <div class="tool-body" style="flex-direction:column;overflow:auto">
+          <div style="display:flex;gap:16px;padding:16px;flex-wrap:wrap">
+            <div style="display:flex;flex-direction:column;gap:10px;align-items:center">
+              <input type="color" id="cl-picker" value="#6c8dff" style="width:110px;height:110px;border:none;border-radius:14px;cursor:pointer;background:none">
+              <div id="cl-swatch" style="width:110px;height:36px;border-radius:8px;border:1px solid var(--border)"></div>
+            </div>
+            <div class="stack" style="flex:1;min-width:260px">
+              <div class="field-row"><label style="min-width:50px">HEX</label><input class="mini grow" id="cl-hex" style="font-family:var(--mono)"><span class="icon-btn" data-c="cl-hex">⧉</span></div>
+              <div class="field-row"><label style="min-width:50px">RGB</label><input class="mini grow" id="cl-rgb" style="font-family:var(--mono)"><span class="icon-btn" data-c="cl-rgb">⧉</span></div>
+              <div class="field-row"><label style="min-width:50px">RGBA</label><input class="mini grow" id="cl-rgba" style="font-family:var(--mono)"><span class="icon-btn" data-c="cl-rgba">⧉</span></div>
+              <div class="field-row"><label style="min-width:50px">HSL</label><input class="mini grow" id="cl-hsl" style="font-family:var(--mono)"><span class="icon-btn" data-c="cl-hsl">⧉</span></div>
+              <div class="field-row"><label style="min-width:50px">Alpha</label><input type="range" id="cl-alpha" min="0" max="100" value="100" style="flex:1"><span id="cl-alpha-val" style="width:36px;font-family:var(--mono);font-size:11.5px">100%</span></div>
+            </div>
+          </div>
+          <div class="card" style="margin:0 16px 16px"><h4>Palette</h4><div id="cl-palette" style="display:flex;flex-direction:column;gap:10px"></div></div>
+          <div class="card" style="margin:0 16px 16px">
+            <h4>Contrast checker</h4>
+            <div class="field-row"><label>Foreground</label><input type="color" id="cl-fg" value="#e6e8ee"><label style="margin-left:12px">Background</label><input type="color" id="cl-bg" value="#14151a"></div>
+            <div id="cl-contrast" style="padding:6px 0"></div>
+          </div>
+        </div>
+      </div>`;
+    function clamp(n,a,b){ return Math.max(a,Math.min(b,n)); }
+    function hexToRgb(hex){
+      hex = hex.replace('#','');
+      if (hex.length===3) hex = hex.split('').map(c=>c+c).join('');
+      const n = parseInt(hex,16);
+      return {r:(n>>16)&255, g:(n>>8)&255, b:n&255};
+    }
+    function rgbToHex({r,g,b}){ return '#'+[r,g,b].map(x=>clamp(Math.round(x),0,255).toString(16).padStart(2,'0')).join(''); }
+    function rgbToHsl({r,g,b}){
+      r/=255; g/=255; b/=255;
+      const max=Math.max(r,g,b), min=Math.min(r,g,b); let h,s,l=(max+min)/2;
+      if (max===min){ h=s=0; } else {
+        const d = max-min; s = l>0.5 ? d/(2-max-min) : d/(max+min);
+        switch(max){ case r: h=(g-b)/d+(g<b?6:0); break; case g: h=(b-r)/d+2; break; default: h=(r-g)/d+4; }
+        h/=6;
+      }
+      return {h:Math.round(h*360), s:Math.round(s*100), l:Math.round(l*100)};
+    }
+    function hslToRgb({h,s,l}){
+      h/=360; s/=100; l/=100;
+      if (s===0){ const v=Math.round(l*255); return {r:v,g:v,b:v}; }
+      const q = l<0.5 ? l*(1+s) : l+s-l*s;
+      const p = 2*l-q;
+      const hue2rgb=(p,q,t)=>{ if(t<0)t+=1; if(t>1)t-=1; if(t<1/6) return p+(q-p)*6*t; if(t<1/2) return q; if(t<2/3) return p+(q-p)*(2/3-t)*6; return p; };
+      return { r:Math.round(hue2rgb(p,q,h+1/3)*255), g:Math.round(hue2rgb(p,q,h)*255), b:Math.round(hue2rgb(p,q,h-1/3)*255) };
+    }
+    let current = hexToRgb('#6c8dff'), alpha = 100;
+    function updateFields(skip){
+      const hex = rgbToHex(current), hsl = rgbToHsl(current);
+      if (skip!=='hex') container.querySelector('#cl-hex').value = hex;
+      if (skip!=='rgb') container.querySelector('#cl-rgb').value = `rgb(${current.r}, ${current.g}, ${current.b})`;
+      if (skip!=='rgba') container.querySelector('#cl-rgba').value = `rgba(${current.r}, ${current.g}, ${current.b}, ${(alpha/100).toFixed(2)})`;
+      if (skip!=='hsl') container.querySelector('#cl-hsl').value = `hsl(${hsl.h}, ${hsl.s}%, ${hsl.l}%)`;
+      container.querySelector('#cl-picker').value = hex;
+      container.querySelector('#cl-swatch').style.background = `rgba(${current.r},${current.g},${current.b},${alpha/100})`;
+      container.querySelector('#cl-alpha-val').textContent = alpha+'%';
+      renderPalette(hsl);
+    }
+    function renderPalette(hsl){
+      const box = container.querySelector('#cl-palette'); box.innerHTML='';
+      function row(label, colors){
+        const r = el('div',{});
+        r.appendChild(el('div',{style:'font-size:10.5px;color:var(--text-dim);margin-bottom:4px'}, label));
+        const swatches = el('div',{style:'display:flex;gap:6px'});
+        colors.forEach(c=>{
+          const hex = rgbToHex(hslToRgb(c));
+          const sw = el('div',{style:`width:36px;height:36px;border-radius:7px;background:${hex};border:1px solid var(--border);cursor:pointer`, title:hex});
+          sw.addEventListener('click', ()=>copyText(hex));
+          swatches.appendChild(sw);
+        });
+        r.appendChild(swatches);
+        box.appendChild(r);
+      }
+      row('Complementary', [hsl, {h:(hsl.h+180)%360, s:hsl.s, l:hsl.l}]);
+      row('Analogous', [-30,-15,0,15,30].map(d=>({h:(hsl.h+d+360)%360, s:hsl.s, l:hsl.l})));
+      row('Monochrome', [20,35,50,65,80].map(l=>({h:hsl.h, s:hsl.s, l})));
+    }
+    function fromHex(v){ try{ current = hexToRgb(v); updateFields('hex'); }catch(e){} }
+    function fromRgbString(v, key){
+      const m = v.match(/([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s]+([\d.]+))?/);
+      if (!m) return;
+      current = {r:clamp(+m[1],0,255), g:clamp(+m[2],0,255), b:clamp(+m[3],0,255)};
+      if (m[4]!==undefined) alpha = clamp(Math.round(+m[4]*100),0,100);
+      updateFields(key);
+    }
+    function fromHsl(v){
+      const m = v.match(/([\d.]+)[,\s]+([\d.]+)%?[,\s]+([\d.]+)%?/);
+      if (!m) return;
+      current = hslToRgb({h:+m[1]%360, s:clamp(+m[2],0,100), l:clamp(+m[3],0,100)});
+      updateFields('hsl');
+    }
+    container.querySelector('#cl-picker').addEventListener('input', e=>fromHex(e.target.value));
+    container.querySelector('#cl-hex').addEventListener('change', e=>fromHex(e.target.value));
+    container.querySelector('#cl-rgb').addEventListener('change', e=>fromRgbString(e.target.value,'rgb'));
+    container.querySelector('#cl-rgba').addEventListener('change', e=>fromRgbString(e.target.value,'rgba'));
+    container.querySelector('#cl-hsl').addEventListener('change', e=>fromHsl(e.target.value));
+    container.querySelector('#cl-alpha').addEventListener('input', e=>{ alpha=+e.target.value; updateFields(); });
+    container.addEventListener('click', e=>{
+      const id = e.target.getAttribute && e.target.getAttribute('data-c');
+      if (id) copyText(container.querySelector('#'+id).value);
+    });
+    function luminance({r,g,b}){
+      const f = v=>{ v/=255; return v<=0.03928 ? v/12.92 : Math.pow((v+0.055)/1.055, 2.4); };
+      return 0.2126*f(r)+0.7152*f(g)+0.0722*f(b);
+    }
+    function contrastRatio(c1,c2){
+      const l1=luminance(c1), l2=luminance(c2);
+      const [a,b] = l1>l2 ? [l1,l2] : [l2,l1];
+      return (a+0.05)/(b+0.05);
+    }
+    function updateContrast(){
+      const fg = hexToRgb(container.querySelector('#cl-fg').value);
+      const bg = hexToRgb(container.querySelector('#cl-bg').value);
+      const ratio = contrastRatio(fg,bg);
+      const box = container.querySelector('#cl-contrast');
+      const badge = (pass,label)=>`<span class="pill ${pass?'ok':'err'}" style="margin-right:6px">${label} ${pass?'Pass':'Fail'}</span>`;
+      box.innerHTML = `<div style="font-family:var(--mono);font-size:20px;margin-bottom:8px">${ratio.toFixed(2)}:1</div>` +
+        badge(ratio>=4.5,'AA normal') + badge(ratio>=3,'AA large') + badge(ratio>=7,'AAA normal') + badge(ratio>=4.5,'AAA large');
+    }
+    container.querySelector('#cl-fg').addEventListener('input', updateContrast);
+    container.querySelector('#cl-bg').addEventListener('input', updateContrast);
+    updateFields(); updateContrast();
+    return {
+      getState: ()=>({hex: rgbToHex(current), alpha}),
+      setState: (s)=>{ if (s.hex) current = hexToRgb(s.hex); if (s.alpha!=null) alpha = s.alpha; updateFields(); }
+    };
+  }
+});
+
+/* =========================================================================
+   TOOL: Markdown Table Generator
+   ========================================================================= */
+registerTool({
+  id:'mdtable-tool', name:'Markdown Table Generator', category:'Developer Utilities', icon:'\u2637',
+  mount(container, api){
+    container.innerHTML = `
+      <div class="tool-shell">
+        <div class="tool-toolbar">
+          <button class="btn" data-a="addrow">+ Row</button>
+          <button class="btn" data-a="addcol">+ Column</button>
+          <button class="btn ghost" data-a="delrow">- Row</button>
+          <button class="btn ghost" data-a="delcol">- Column</button>
+          <span class="grow"></span>
+          <button class="btn" data-a="copy">Copy Markdown</button>
+        </div>
+        <div style="padding:14px;overflow:auto" id="mdt-grid"></div>
+        <div class="split-header">Markdown output</div>
+        <textarea class="plain-textarea" id="mdt-out" readonly style="flex:0 0 140px;font-size:12px"></textarea>
+      </div>`;
+    let cols = ['Column A','Column B','Column C'];
+    let aligns = ['left','left','left'];
+    let rows = [['a1','b1','c1'],['a2','b2','c2']];
+    function renderGrid(){
+      const grid = container.querySelector('#mdt-grid');
+      const table = el('table',{style:'border-collapse:collapse'});
+      const headRow = el('tr',{});
+      cols.forEach((c,ci)=>{
+        const th = el('th',{style:'border:1px solid var(--border);padding:0'});
+        const inp = el('input',{class:'mini', style:'border:none;font-weight:700;width:120px', value:c});
+        inp.addEventListener('input', e=>cols[ci]=e.target.value);
+        inp.addEventListener('change', renderOutput);
+        const alignSel = el('select',{class:'mini', style:'border:none;font-size:10px;width:120px'},
+          el('option',{value:'left'},'left'), el('option',{value:'center'},'center'), el('option',{value:'right'},'right'));
+        alignSel.value = aligns[ci];
+        alignSel.addEventListener('change', e=>{ aligns[ci]=e.target.value; renderOutput(); });
+        th.appendChild(inp); th.appendChild(alignSel);
+        headRow.appendChild(th);
+      });
+      table.appendChild(headRow);
+      rows.forEach((row,ri)=>{
+        const tr = el('tr',{});
+        row.forEach((cell,ci)=>{
+          const td = el('td',{style:'border:1px solid var(--border);padding:0'});
+          const inp = el('input',{class:'mini', style:'border:none;width:120px', value:cell});
+          inp.addEventListener('input', e=>{ rows[ri][ci]=e.target.value; });
+          inp.addEventListener('change', renderOutput);
+          td.appendChild(inp);
+          tr.appendChild(td);
+        });
+        table.appendChild(tr);
+      });
+      grid.innerHTML=''; grid.appendChild(table);
+    }
+    function renderOutput(){
+      const alignMark = a => a==='center' ? ':---:' : a==='right' ? '---:' : '---';
+      let out = '| ' + cols.join(' | ') + ' |\n';
+      out += '| ' + aligns.map(alignMark).join(' | ') + ' |\n';
+      rows.forEach(r=> out += '| ' + r.map(c=>c.replace(/\|/g,'\\|')).join(' | ') + ' |\n');
+      container.querySelector('#mdt-out').value = out;
+      api.setStatus(`${rows.length} rows × ${cols.length} cols`);
+    }
+    container.querySelector('#mdt-grid').addEventListener('click', ()=>{});
+    container.querySelector('[data-a="addrow"]').addEventListener('click', ()=>{ rows.push(cols.map(()=>'')); renderGrid(); renderOutput(); });
+    container.querySelector('[data-a="addcol"]').addEventListener('click', ()=>{ cols.push('Column '+(cols.length+1)); aligns.push('left'); rows.forEach(r=>r.push('')); renderGrid(); renderOutput(); });
+    container.querySelector('[data-a="delrow"]').addEventListener('click', ()=>{ if (rows.length>1) rows.pop(); renderGrid(); renderOutput(); });
+    container.querySelector('[data-a="delcol"]').addEventListener('click', ()=>{ if (cols.length>1){ cols.pop(); aligns.pop(); rows.forEach(r=>r.pop()); } renderGrid(); renderOutput(); });
+    container.querySelector('[data-a="copy"]').addEventListener('click', ()=>copyText(container.querySelector('#mdt-out').value));
+    renderGrid(); renderOutput();
+    return {
+      getState: ()=>({cols:[...cols], aligns:[...aligns], rows: rows.map(r=>[...r])}),
+      setState: (s)=>{ cols=s.cols||cols; aligns=s.aligns||aligns; rows=s.rows||rows; renderGrid(); renderOutput(); }
+    };
+  }
+});
+
+/* =========================================================================
+   TOOL: CSV <-> JSON Converter (dedicated — richer than the generic Data Converter)
+   ========================================================================= */
+registerTool({
+  id:'csvjson-tool', name:'CSV \u2194 JSON', category:'Core Tools', icon:'\u2317',
+  mount(container, api){
+    container.innerHTML = `
+      <div class="tool-shell">
+        <div class="tool-toolbar">
+          <button class="btn primary" data-a="csv2json">CSV \u2192 JSON</button>
+          <button class="btn" data-a="json2csv">JSON \u2192 CSV</button>
+          <label class="toggle-row"><input type="checkbox" id="cj-header" checked> Has header row</label>
+          <label class="toggle-row"><input type="checkbox" id="cj-nested" checked> Nest dot-path columns (a.b.c)</label>
+          <select class="mini" id="cj-delim"><option value=",">, comma</option><option value=";">; semicolon</option><option value="\t">tab</option></select>
+          <span class="grow"></span>
+          <label class="btn ghost" style="cursor:pointer">Import file… <input type="file" id="cj-file" accept=".csv,.json" style="display:none"></label>
+          <button class="btn" data-a="download">Download output</button>
+        </div>
+        <div class="err-banner" id="cj-err"></div>
+        <div class="tool-body">
+          <div class="split"><div class="split-header">Input</div><textarea class="plain-textarea" id="cj-in" placeholder="Paste CSV or JSON…">name,role,address.city,address.zip
+Ada Lovelace,Engineer,London,SW1A
+Grace Hopper,Admiral,Arlington,22201</textarea></div>
+          <div class="split">
+            <div class="split-header">Preview <span class="grow"></span><span class="pill" id="cj-status">—</span></div>
+            <div id="cj-preview" style="flex:0 0 45%;overflow:auto;border-bottom:1px solid var(--border)"></div>
+            <div class="split-header">Output</div>
+            <textarea class="plain-textarea" id="cj-out" readonly></textarea>
+          </div>
+        </div>
+      </div>`;
+    function setNested(obj, path, value){
+      const parts = path.split('.');
+      let cur = obj;
+      for (let i=0;i<parts.length-1;i++){ cur[parts[i]] = cur[parts[i]] || {}; cur = cur[parts[i]]; }
+      cur[parts[parts.length-1]] = value;
+    }
+    function flatten(obj, prefix=''){
+      let out = {};
+      for (const [k,v] of Object.entries(obj)){
+        const key = prefix ? prefix+'.'+k : k;
+        if (v && typeof v==='object' && !Array.isArray(v)) Object.assign(out, flatten(v, key));
+        else out[key] = Array.isArray(v) ? JSON.stringify(v) : v;
+      }
+      return out;
+    }
+    function renderPreview(rows){
+      const box = container.querySelector('#cj-preview'); box.innerHTML='';
+      if (!rows || !rows.length){ box.innerHTML = '<div style="padding:10px;color:var(--text-dim)">No rows to preview</div>'; return; }
+      const cols = Object.keys(rows[0]);
+      const table = el('table',{class:'kv', style:'width:100%'});
+      const head = el('tr',{}); cols.forEach(c=>head.appendChild(el('td',{style:'font-weight:700;color:var(--text-primary)'},c))); table.appendChild(head);
+      rows.slice(0,50).forEach(r=>{
+        const tr = el('tr',{}); cols.forEach(c=>tr.appendChild(el('td',{}, r[c]===undefined?'':String(r[c])))); table.appendChild(tr);
+      });
+      box.appendChild(table);
+      if (rows.length>50) box.appendChild(el('div',{style:'padding:6px;color:var(--text-dim);font-size:11px'}, `…and ${rows.length-50} more rows`));
+    }
+    function csv2json(){
+      const delim = container.querySelector('#cj-delim').value;
+      const hasHeader = container.querySelector('#cj-header').checked;
+      const nested = container.querySelector('#cj-nested').checked;
+      const bnr = container.querySelector('#cj-err');
+      try{
+        const parsed = Papa.parse(container.querySelector('#cj-in').value.trim(), {header:hasHeader, delimiter:delim, dynamicTyping:true, skipEmptyLines:true});
+        if (parsed.errors.length) throw new Error(parsed.errors[0].message);
+        let rows = parsed.data;
+        let jsonRows;
+        if (hasHeader){
+          jsonRows = rows.map(r=>{
+            if (!nested) return r;
+            const obj = {};
+            Object.entries(r).forEach(([k,v])=>setNested(obj,k,v));
+            return obj;
+          });
+        } else jsonRows = rows;
+        container.querySelector('#cj-out').value = JSON.stringify(jsonRows, null, STATE.indent);
+        renderPreview(rows.map(r=>hasHeader?r:Object.fromEntries(r.map((v,i)=>['col'+i,v]))));
+        bnr.classList.remove('show');
+        container.querySelector('#cj-status').textContent = `${jsonRows.length} rows`; container.querySelector('#cj-status').className='pill ok';
+        api.setStatus(`Converted ${jsonRows.length} rows`, true);
+      }catch(e){ bnr.textContent = e.message; bnr.classList.add('show'); api.setStatus('CSV parse error', false); }
+    }
+    function json2csv(){
+      const bnr = container.querySelector('#cj-err');
+      try{
+        const data = JSON.parse(container.querySelector('#cj-in').value);
+        const arr = Array.isArray(data) ? data : [data];
+        const flat = arr.map(o=>flatten(o));
+        const csv = Papa.unparse(flat, {delimiter: container.querySelector('#cj-delim').value});
+        container.querySelector('#cj-out').value = csv;
+        renderPreview(flat);
+        bnr.classList.remove('show');
+        container.querySelector('#cj-status').textContent = `${arr.length} rows`; container.querySelector('#cj-status').className='pill ok';
+        api.setStatus(`Converted ${arr.length} rows`, true);
+      }catch(e){ bnr.textContent = e.message; bnr.classList.add('show'); api.setStatus('JSON parse error', false); }
+    }
+    container.querySelector('[data-a="csv2json"]').addEventListener('click', csv2json);
+    container.querySelector('[data-a="json2csv"]').addEventListener('click', json2csv);
+    container.querySelector('[data-a="download"]').addEventListener('click', ()=>{
+      const out = container.querySelector('#cj-out').value;
+      const looksJson = out.trim().startsWith('[') || out.trim().startsWith('{');
+      download(looksJson?'output.json':'output.csv', out, looksJson?'application/json':'text/csv');
+    });
+    container.querySelector('#cj-file').addEventListener('change', async e=>{
+      const f = e.target.files[0]; if (!f) return;
+      container.querySelector('#cj-in').value = await readFileAsText(f);
+      if (f.name.endsWith('.json')) json2csv(); else csv2json();
+    });
+    csv2json();
+    return {
+      getState: ()=>({input: container.querySelector('#cj-in').value, header:container.querySelector('#cj-header').checked, nested:container.querySelector('#cj-nested').checked, delim:container.querySelector('#cj-delim').value}),
+      setState: (s)=>{
+        container.querySelector('#cj-in').value = s.input||'';
+        container.querySelector('#cj-header').checked = s.header!==false;
+        container.querySelector('#cj-nested').checked = s.nested!==false;
+        if (s.delim) container.querySelector('#cj-delim').value = s.delim;
+        csv2json();
+      }
+    };
+  }
+});
+
+/* =========================================================================
+   TOOL: Cron Builder, Parser, Human-readable Translator & Next-run Calculator
+   Scope note: standard 5-field Unix cron (minute hour day month weekday),
+   plus an optional leading seconds field for basic Quartz-style expressions.
+   Special Quartz characters (L, W, #, ?) are not supported — lists, ranges,
+   steps, and wildcards are. Human -> cron covers common phrasings, not
+   full natural language.
+   ========================================================================= */
+const CRON_PRESETS = [
+  ['Every minute', '* * * * *'],
+  ['Every 5 minutes', '*/5 * * * *'],
+  ['Every 15 minutes', '*/15 * * * *'],
+  ['Every 30 minutes', '*/30 * * * *'],
+  ['Every hour', '0 * * * *'],
+  ['Every day at midnight', '0 0 * * *'],
+  ['Every day at 9am', '0 9 * * *'],
+  ['Every weekday at 9am', '0 9 * * 1-5'],
+  ['Every Sunday at midnight', '0 0 * * 0'],
+  ['Every 1st of the month', '0 0 1 * *'],
+  ['Every year on Jan 1st', '0 0 1 1 *'],
+];
+const MONTH_NAMES = {jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12};
+const DOW_NAMES = {sun:0,mon:1,tue:2,wed:3,thu:4,fri:5,sat:6};
+function cronParseField(str, min, max, names){
+  str = str.trim().toLowerCase();
+  if (names) Object.entries(names).forEach(([name,num])=>{ str = str.replace(new RegExp(name,'g'), num); });
+  const out = new Set();
+  str.split(',').forEach(part=>{
+    let [range, step] = part.split('/');
+    step = step ? parseInt(step,10) : 1;
+    if (!step || step<1) throw new Error('Invalid step in "'+part+'"');
+    let lo=min, hi=max;
+    if (range !== '*'){
+      if (range.includes('-')){ const [a,b] = range.split('-').map(n=>parseInt(n,10)); if (isNaN(a)||isNaN(b)) throw new Error('Invalid range "'+range+'"'); lo=a; hi=b; }
+      else { const v = parseInt(range,10); if (isNaN(v)) throw new Error('Invalid value "'+range+'"'); lo=v; hi=v; }
+    }
+    if (lo<min||hi>max||lo>hi) throw new Error(`Value out of range (${min}-${max}) in "${part}"`);
+    for (let v=lo; v<=hi; v+=step) out.add(v===7&&max===7?0:v); // normalize Sunday=7 to 0
+  });
+  return out;
+}
+function parseCron(expr){
+  const parts = expr.trim().split(/\s+/);
+  let sec=null, min, hour, day, month, weekday;
+  if (parts.length===6){ [sec,min,hour,day,month,weekday] = parts; }
+  else if (parts.length===5){ [min,hour,day,month,weekday] = parts; }
+  else throw new Error('Expected 5 fields (or 6 with seconds), got '+parts.length);
+  return {
+    sec: sec!==null ? cronParseField(sec,0,59) : null,
+    min: cronParseField(min,0,59),
+    hour: cronParseField(hour,0,23),
+    day: cronParseField(day,1,31),
+    dayIsWild: day.trim()==='*',
+    month: cronParseField(month,1,12,MONTH_NAMES),
+    weekday: cronParseField(weekday,0,7,DOW_NAMES),
+    weekdayIsWild: weekday.trim()==='*',
+    raw: expr.trim()
+  };
+}
+function cronMatches(fields, d){
+  if (fields.sec && !fields.sec.has(d.getSeconds())) return false;
+  if (!fields.min.has(d.getMinutes())) return false;
+  if (!fields.hour.has(d.getHours())) return false;
+  if (!fields.month.has(d.getMonth()+1)) return false;
+  const dayOk = fields.day.has(d.getDate());
+  const dowOk = fields.weekday.has(d.getDay());
+  if (fields.dayIsWild && fields.weekdayIsWild) return true;
+  if (fields.dayIsWild) return dowOk;
+  if (fields.weekdayIsWild) return dayOk;
+  return dayOk || dowOk; // classic cron OR-rule when both are restricted
+}
+function cronNextRuns(fields, count, from){
+  const results = [];
+  let d = new Date(from.getTime());
+  const stepMs = fields.sec ? 1000 : 60000;
+  if (!fields.sec) d.setSeconds(0,0);
+  d = new Date(d.getTime() + stepMs);
+  let guard = fields.sec ? 366*24*60*60 : 2*366*24*60; // ~1yr of seconds, or ~2yr of minutes
+  while (results.length < count && guard-- > 0){
+    if (cronMatches(fields, d)) results.push(new Date(d.getTime()));
+    d = new Date(d.getTime() + stepMs);
+  }
+  return results;
+}
+function setToList(set, min, max){
+  const arr = [...set].sort((a,b)=>a-b);
+  if (arr.length === (max-min+1)) return null; // full range = "every"
+  return arr;
+}
+const MONTH_LABELS = ['','January','February','March','April','May','June','July','August','September','October','November','December'];
+const DOW_LABELS = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+function cronToHuman(fields){
+  const minList = setToList(fields.min, 0, 59);
+  const hourList = setToList(fields.hour, 0, 23);
+  const dayList = fields.dayIsWild ? null : setToList(fields.day, 1, 31);
+  const monthList = setToList(fields.month, 1, 12);
+  const dowList = fields.weekdayIsWild ? null : setToList(fields.weekday, 0, 6);
+
+
+  // "every N minutes/hours" step detection
+  const stepOf = (raw)=>{ const m = raw.match(/^\*\/(\d+)$/); return m ? +m[1] : null; };
+  const cronFieldsRaw = fields.raw.split(/\s+/);
+  const rawOffset = cronFieldsRaw.length===6 ? 1 : 0;
+  const minStep = stepOf(cronFieldsRaw[rawOffset]);
+  const hourStep = stepOf(cronFieldsRaw[rawOffset+1]);
+
+  let time;
+  if (minStep) time = `every ${minStep} minute${minStep===1?'':'s'}`;
+  else if (hourStep) time = `every ${hourStep} hour${hourStep===1?'':'s'}, at minute ${[...fields.min][0]}`;
+  else if (minList===null && hourList===null) time = 'every minute';
+  else if (minList===null) time = `every minute of ${[...fields.hour].sort((a,b)=>a-b).map(h=>String(h).padStart(2,'0')+':00').join(', ')}`;
+  else if (hourList===null) time = `at minute ${minList.join(', ')} of every hour`;
+  else {
+    const times = [...fields.hour].sort((a,b)=>a-b).flatMap(h=>[...fields.min].sort((a,b)=>a-b).map(m=>`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`));
+    time = (times.length<=4 ? 'at ' : times.length+' times/day, at ') + times.slice(0,4).join(', ') + (times.length>4?', …':'');
+  }
+
+  let dayPart = '';
+  if (dowList && dayList) dayPart = ` on day ${dayList.join(', ')} of the month or on ${dowList.map(d=>DOW_LABELS[d]).join(', ')}`;
+  else if (dowList) dayPart = ` on ${dowList.map(d=>DOW_LABELS[d]).join(', ')}`;
+  else if (dayList) dayPart = ` on day ${dayList.join(', ')} of the month`;
+
+  let monthPart = monthList ? ` in ${monthList.map(m=>MONTH_LABELS[m]).join(', ')}` : '';
+
+  return `Runs ${time}${dayPart}${monthPart}.`.replace(/\s+/g,' ');
+}
+function humanToCron(phrase){
+  const p = phrase.trim().toLowerCase();
+  let m;
+  if (/^every minute$/.test(p)) return '* * * * *';
+  if ((m = p.match(/^every (\d+) minutes?$/))) return `*/${m[1]} * * * *`;
+  if ((m = p.match(/^every (\d+) hours?$/))) return `0 */${m[1]} * * *`;
+  if (/^every hour$/.test(p)) return '0 * * * *';
+  if (/^every day at midnight$/.test(p)) return '0 0 * * *';
+  if ((m = p.match(/^every day at (\d{1,2}):?(\d{2})?\s*(am|pm)?$/))){
+    let h = +m[1]; const min = m[2]?+m[2]:0; const ap = m[3];
+    if (ap==='pm' && h<12) h+=12; if (ap==='am' && h===12) h=0;
+    return `${min} ${h} * * *`;
+  }
+  if (/^every weekday(s)? at (\d{1,2})/.test(p)){
+    const mm = p.match(/(\d{1,2}):?(\d{2})?\s*(am|pm)?/);
+    let h=+mm[1]; const min = mm[2]?+mm[2]:0; const ap=mm[3];
+    if (ap==='pm'&&h<12) h+=12; if (ap==='am'&&h===12) h=0;
+    return `${min} ${h} * * 1-5`;
+  }
+  for (const dname of Object.keys(DOW_NAMES)){
+    if (p.startsWith('every '+dname)){
+      const mm = p.match(/(\d{1,2}):?(\d{2})?\s*(am|pm)?/);
+      let h = mm ? +mm[1] : 0; const min = mm && mm[2] ? +mm[2] : 0; const ap = mm && mm[3];
+      if (ap==='pm'&&h<12) h+=12; if (ap==='am'&&h===12) h=0;
+      return `${min} ${h} * * ${DOW_NAMES[dname]}`;
+    }
+  }
+  if (/^every week$/.test(p)) return '0 0 * * 0';
+  if (/^every month$/.test(p)) return '0 0 1 * *';
+  if (/^every year$/.test(p)) return '0 0 1 1 *';
+  return null;
+}
+
+registerTool({
+  id:'cron-tool', name:'Cron Builder', category:'Core Tools', icon:'\u23F0',
+  mount(container, api){
+    container.innerHTML = `
+      <div class="tool-shell">
+        <div class="tool-toolbar">
+          <select class="mini" id="cr-preset"><option value="">Presets…</option>${CRON_PRESETS.map(([n,e])=>`<option value="${escapeHtml(e)}">${escapeHtml(n)}</option>`).join('')}</select>
+          <input class="mini grow" id="cr-expr" style="font-family:var(--mono);max-width:220px" value="*/5 * * * *">
+          <span class="pill" id="cr-pill">—</span>
+        </div>
+        <div class="err-banner" id="cr-err"></div>
+        <div class="grid-2" style="grid-template-columns:1fr 1fr">
+          <div class="card">
+            <h4>Visual builder</h4>
+            <div id="cr-builder" class="stack"></div>
+          </div>
+          <div class="card">
+            <h4>Human readable</h4>
+            <div id="cr-human" style="font-size:13.5px;line-height:1.6;min-height:40px"></div>
+            <div class="field-row" style="padding:10px 0 4px">
+              <input class="mini grow" id="cr-h2c" placeholder="e.g. every 5 minutes / every day at 9am">
+              <button class="btn" data-a="h2c">\u2192 Cron</button>
+            </div>
+          </div>
+        </div>
+        <div class="card" style="margin:0 12px 12px">
+          <h4>Next runs</h4>
+          <div class="field-row" style="padding:0 0 8px"><label>From</label><input type="datetime-local" class="mini" id="cr-from"><button class="btn ghost" data-a="now">Now</button></div>
+          <div id="cr-runs" style="font-family:var(--mono);font-size:12.5px"></div>
+        </div>
+      </div>`;
+    const FIELD_DEFS = [
+      {key:'min', label:'Minute', min:0, max:59},
+      {key:'hour', label:'Hour', min:0, max:23},
+      {key:'day', label:'Day of month', min:1, max:31},
+      {key:'month', label:'Month', min:1, max:12},
+      {key:'weekday', label:'Weekday (0=Sun)', min:0, max:6},
+    ];
+    function buildExprFromBuilder(){
+      const vals = FIELD_DEFS.map(f=>{
+        const mode = container.querySelector(`[data-field="${f.key}"] .cr-mode`).value;
+        if (mode==='every') return '*';
+        if (mode==='step') return '*/' + (container.querySelector(`[data-field="${f.key}"] .cr-step`).value || '1');
+        return container.querySelector(`[data-field="${f.key}"] .cr-list`).value || '*';
+      });
+      container.querySelector('#cr-expr').value = vals.join(' ');
+      evaluate();
+    }
+    function renderBuilder(fields){
+      const box = container.querySelector('#cr-builder'); box.innerHTML = '';
+      FIELD_DEFS.forEach(f=>{
+        const row = el('div',{'data-field':f.key, style:'display:flex;gap:6px;align-items:center'});
+        row.appendChild(el('span',{style:'width:110px;font-size:11.5px;color:var(--text-secondary)'}, f.label));
+        const mode = el('select',{class:'mini cr-mode'}, el('option',{value:'every'},'Every'), el('option',{value:'step'},'Every N'), el('option',{value:'list'},'Specific / range'));
+        const step = el('input',{class:'mini cr-step', type:'number', min:'1', style:'width:60px;display:none', placeholder:'N'});
+        const list = el('input',{class:'mini cr-list', style:'width:110px;display:none', placeholder:'e.g. 1,3,5 or 9-17'});
+        mode.addEventListener('change', ()=>{
+          step.style.display = mode.value==='step' ? 'inline-block':'none';
+          list.style.display = mode.value==='list' ? 'inline-block':'none';
+          buildExprFromBuilder();
+        });
+        step.addEventListener('input', debounce(buildExprFromBuilder,200));
+        list.addEventListener('input', debounce(buildExprFromBuilder,200));
+        row.appendChild(mode); row.appendChild(step); row.appendChild(list);
+        box.appendChild(row);
+      });
+    }
+    function syncBuilderFromFields(fields){
+      FIELD_DEFS.forEach(f=>{
+        const row = container.querySelector(`[data-field="${f.key}"]`); if (!row) return;
+        const set = fields[f.key];
+        const full = setToList(set, f.min, f.max) === null;
+        const modeSel = row.querySelector('.cr-mode'), stepInp = row.querySelector('.cr-step'), listInp = row.querySelector('.cr-list');
+        if (full){ modeSel.value='every'; stepInp.style.display='none'; listInp.style.display='none'; return; }
+        const rawField = fields.raw.split(/\s+/)[fields.raw.split(/\s+/).length===6?FIELD_DEFS.indexOf(f)+1:FIELD_DEFS.indexOf(f)];
+        const stepMatch = rawField && rawField.match(/^\*\/(\d+)$/);
+        if (stepMatch){ modeSel.value='step'; stepInp.value = stepMatch[1]; stepInp.style.display='inline-block'; listInp.style.display='none'; }
+        else { modeSel.value='list'; listInp.value = rawField; listInp.style.display='inline-block'; stepInp.style.display='none'; }
+      });
+    }
+    function evaluate(){
+      const expr = container.querySelector('#cr-expr').value;
+      const bnr = container.querySelector('#cr-err');
+      const pill = container.querySelector('#cr-pill');
+      try{
+        const fields = parseCron(expr);
+        pill.textContent = 'Valid'; pill.className='pill ok'; bnr.classList.remove('show');
+        container.querySelector('#cr-human').textContent = cronToHuman(fields);
+        renderRuns(fields);
+        if (!container.querySelector('#cr-builder').children.length) renderBuilder(fields);
+        syncBuilderFromFields(fields);
+        api.setStatus('Valid cron expression', true);
+        return fields;
+      }catch(e){
+        pill.textContent = 'Invalid'; pill.className='pill err';
+        bnr.textContent = e.message; bnr.classList.add('show');
+        container.querySelector('#cr-human').textContent = '';
+        container.querySelector('#cr-runs').innerHTML = '';
+        api.setStatus(e.message, false);
+        return null;
+      }
+    }
+    function renderRuns(fields){
+      const fromInput = container.querySelector('#cr-from').value;
+      const from = fromInput ? new Date(fromInput) : new Date();
+      const runs = cronNextRuns(fields, 5, from);
+      const box = container.querySelector('#cr-runs'); box.innerHTML = '';
+      if (!runs.length){ box.textContent = 'No upcoming run found in the search window.'; return; }
+      const msUntil = runs[0].getTime() - Date.now();
+      box.appendChild(el('div',{style:'color:var(--text-dim);margin-bottom:6px'}, `Next run in ${humanizeMs(msUntil)}`));
+      runs.forEach(r=>box.appendChild(el('div',{}, r.toLocaleString())));
+    }
+    function humanizeMs(ms){
+      if (ms<0) return 'the past (check your "from" time)';
+      const s = Math.floor(ms/1000);
+      const d = Math.floor(s/86400), h = Math.floor((s%86400)/3600), m = Math.floor((s%3600)/60);
+      const parts = [];
+      if (d) parts.push(d+'d'); if (h) parts.push(h+'h'); if (m || !parts.length) parts.push(m+'m');
+      return parts.join(' ');
+    }
+    container.querySelector('#cr-expr').addEventListener('input', debounce(evaluate, 200));
+    container.querySelector('#cr-preset').addEventListener('change', e=>{ if (e.target.value){ container.querySelector('#cr-expr').value = e.target.value; evaluate(); } });
+    container.querySelector('#cr-from').addEventListener('change', ()=>evaluate());
+    container.querySelector('[data-a="now"]').addEventListener('click', ()=>{ container.querySelector('#cr-from').value=''; evaluate(); });
+    container.querySelector('[data-a="h2c"]').addEventListener('click', ()=>{
+      const phrase = container.querySelector('#cr-h2c').value;
+      const cron = humanToCron(phrase);
+      if (cron){ container.querySelector('#cr-expr').value = cron; evaluate(); toast('Translated to cron','ok'); }
+      else toast('Could not translate that phrase — try e.g. "every 5 minutes" or "every day at 9am"','err');
+    });
+    evaluate();
+    return {
+      getState: ()=>({expr: container.querySelector('#cr-expr').value, from: container.querySelector('#cr-from').value}),
+      setState: (s)=>{ container.querySelector('#cr-expr').value = s.expr||'* * * * *'; container.querySelector('#cr-from').value = s.from||''; evaluate(); }
+    };
   }
 });

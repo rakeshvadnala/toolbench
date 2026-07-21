@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented here.
 
+## v1.2.0 (2026-07-21)
+
+### Added
+
+- **Tab duplication/cloning** — duplicate any open tab into a fully independent instance with the same content, queries, and selections; rename any tab by double-clicking it
+- CSV ⇄ JSON — dedicated converter with dot-path nesting, table preview, and file import/export
+- Cron Builder — visual field builder, manual editor with validation, presets, bidirectional human-readable translation, and a next-5-runs calculator
+- Number Base Converter (binary/octal/decimal/hex, arbitrary precision)
+- Text Case Converter (9 case styles, one-click copy)
+- Random Generator (passwords, strings, hex tokens, PINs, live entropy estimate)
+- HTTP Status Code Reference (searchable, categorized)
+- Color Picker & Converter (HEX/RGB/RGBA/HSL, palette generator, WCAG contrast checker)
+- Markdown Table Generator (visual grid editor)
+
+### Known limitations
+
+- Cron Builder: standard 5-field Unix cron + basic 6-field seconds variant only; no Quartz `L`/`W`/`#`/`?` tokens; human → cron only covers common phrasings
+- Deferred to a future release: QR code generator/reader, X.509 certificate decoder, CSS/JS beautifier & minifier, image toolbox, full ASCII/Unicode/emoji explorer
+
 ## v1.1.0 (2026-07-21)
 
 ### Added
