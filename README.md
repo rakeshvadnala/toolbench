@@ -20,6 +20,19 @@ A modern, offline-first developer utility toolkit that runs entirely in the brow
 - **Text / JSON Diff** — line-level diff, JSON-aware comparison (key sorting), ignore-whitespace mode
 - **Data Converter** — JSON ⇄ YAML ⇄ CSV ⇄ XML
 
+**Notes Workspace**
+- **Markdown Notes** — a local, offline notes app in the Obsidian/Typora mould:
+  - Nested folders, favorites, pinning, full-text + tag search
+  - CodeMirror editor with Editor / Split / Preview modes
+  - GFM preview (tables, task lists, code fences) via `marked` + `DOMPurify`, syntax-highlighted code blocks, one-click copy
+  - Mermaid diagrams and KaTeX math, rendered live
+  - `[[Wikilinks]]` with autocomplete-as-you-type and an automatic backlinks panel
+  - Tags with color coding, inline find & replace, word count / reading time / cursor position
+  - 11 built-in templates (README, meeting notes, bug report, ADR, sprint planning, and more)
+  - Export a note as `.md`, `.html`, or `.txt`, or straight to print/PDF
+  - Export/import the whole notes workspace as JSON
+  - Paste or drag an image straight into a note (embedded as a data URL)
+
 **Developer Utilities**
 - JWT Decoder (header/payload/expiry, all local)
 - Base64 Utility (text and file encoding, UTF-8 safe)
@@ -55,7 +68,8 @@ toolbench/
                  # + one registerTool({...}) block per tool
 ```
 
-Toolbench uses a small plugin registry: every tool is a single object pushed into a `TOOLS` array with a `mount(container, api)` function. The shell has no knowledge of what any individual tool does — adding tool #13 means writing one new `registerTool({...})` block and nothing else.
+- Toolbench uses a small plugin registry: every tool is a single object pushed into a `TOOLS` array with a `mount(container, api)` function. The shell has no knowledge of what any individual tool does — adding tool #14 means writing one new `registerTool({...})` block and nothing else.
+- The Markdown Notes tool lazy-loads its own dependencies (`marked`, `DOMPurify`, `highlight.js`, `Mermaid`, `KaTeX`) the first time it's opened, so the rest of the app doesn't pay for them.
 
 ## Keyboard shortcuts
 
@@ -75,6 +89,7 @@ Toolbench is an actively-developed MVP, not a finished product. Current gaps, tr
 - No drag-to-reorder tabs or split-pane view
 - JSONPath and XPath support the common real-world syntax, not the full spec
 - CodeMirror, js-yaml, and PapaParse load from a CDN, so first load needs an internet connection
+- Markdown Notes stores everything in `localStorage` (not IndexedDB / File System Access API) — fine for personal note-taking, not built for thousands of notes; no drag-to-reorder in the folder tree; no version history beyond the editor's own undo stack; pasted images are embedded as data URLs rather than managed as separate assets
 
 See [CHANGELOG.md](CHANGELOG.md) for release history and [CONTRIBUTING.md](CONTRIBUTING.md) if you'd like to help close these gaps.
 

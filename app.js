@@ -78,7 +78,7 @@ function saveState(){
    Each tool: { id, name, category, icon, mount(container) -> optional cleanup fn }
    Categories drive the sidebar grouping and are shown in that order.
 --------------------------------------------------------------------------- */
-const CATEGORIES = ['Core Tools', 'Developer Utilities'];
+const CATEGORIES = ['Core Tools', 'Notes Workspace', 'Developer Utilities'];
 const TOOLS = [];
 function registerTool(def){ TOOLS.push(def); }
 
@@ -1416,3 +1416,641 @@ registerTool({
 
 /* ------------------------------- go! -------------------------------------- */
 document.addEventListener('DOMContentLoaded', initShell);
+
+/* =========================================================================
+   Lazy asset loader — the Notes tool's dependencies (marked, DOMPurify,
+   highlight.js, mermaid, KaTeX) are only fetched the first time someone
+   actually opens that tool, so the rest of the app doesn't pay for them.
+   ========================================================================= */
+const _loadedAssets = {};
+function loadScript(src){
+  if (_loadedAssets[src]) return _loadedAssets[src];
+  _loadedAssets[src] = new Promise((resolve,reject)=>{
+    const s = document.createElement('script');
+    s.src = src; s.async = false; s.onload = ()=>resolve(); s.onerror = ()=>reject(new Error('Failed to load '+src));
+    document.head.appendChild(s);
+  });
+  return _loadedAssets[src];
+}
+function loadCSS(href){
+  if (_loadedAssets[href]) return;
+  _loadedAssets[href] = true;
+  const l = document.createElement('link'); l.rel='stylesheet'; l.href=href;
+  document.head.appendChild(l);
+}
+async function loadNotesDeps(){
+  loadCSS('https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css');
+  loadCSS('https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.10/katex.min.css');
+  // async=false on each <script> preserves execution order even though fetches run in parallel
+  await Promise.all([
+    loadScript('https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/markdown/markdown.min.js'),
+    loadScript('https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js'),
+    loadScript('https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js'),
+    loadScript('https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js'),
+    loadScript('https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js'),
+    loadScript('https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.10/katex.min.js'),
+    loadScript('https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.10/contrib/auto-render.min.js'),
+  ]);
+  if (window.mermaid) mermaid.initialize({startOnLoad:false, theme: STATE.theme==='dark'?'dark':'default'});
+}
+
+/* ---- Built-in note templates ---- */
+const NOTE_TEMPLATES = {
+  'README': '# Project Name\n\nOne-line description of what this project does.\n\n## Installation\n\n```bash\nnpm install\n```\n\n## Usage\n\n```js\n// example\n```\n\n## License\n\nMIT',
+  'Meeting Notes': '# Meeting Notes — {{date}}\n\n**Attendees:** \n**Goal:** \n\n## Discussion\n\n- \n\n## Decisions\n\n- \n\n## Action Items\n\n- [ ] \n',
+  'Daily Note': '# {{date}}\n\n## Focus\n\n- \n\n## Notes\n\n- \n\n## Tomorrow\n\n- [ ] \n',
+  'Project Documentation': '# Project Documentation\n\n## Overview\n\n## Goals\n\n## Scope\n\n## Timeline\n\n## Stakeholders\n',
+  'API Documentation': '# API Reference\n\n## `GET /resource`\n\n**Description:** \n\n**Params**\n\n| Name | Type | Required | Description |\n|---|---|---|---|\n| id | string | yes | |\n\n**Response**\n\n```json\n{}\n```\n',
+  'Release Notes': '# Release {{date}}\n\n## Added\n\n- \n\n## Fixed\n\n- \n\n## Changed\n\n- \n',
+  'Architecture Design': '# Architecture Design\n\n## Context\n\n## Decision\n\n## Consequences\n\n## Alternatives Considered\n',
+  'Sprint Planning': '# Sprint Planning — {{date}}\n\n## Sprint Goal\n\n## Committed Items\n\n- [ ] \n\n## Capacity\n\n## Risks\n',
+  'Bug Report': '# Bug Report\n\n**Summary:** \n**Environment:** \n**Steps to Reproduce**\n\n1. \n\n**Expected**\n\n**Actual**\n\n**Severity:** ',
+  'Technical Design Document': '# Technical Design Document\n\n## Problem Statement\n\n## Proposed Solution\n\n## Data Model\n\n## API Changes\n\n## Rollout Plan\n',
+  'Knowledge Base Article': '# Article Title\n\n## Summary\n\n## Details\n\n## Related\n\n- [[]]\n',
+  'Blank': '',
+};
+function fillTemplate(t){ return t.replace(/\{\{date\}\}/g, new Date().toISOString().slice(0,10)); }
+
+/* =========================================================================
+   TOOL: Markdown Notes Workspace
+   Scope note: uses localStorage (not IndexedDB / File System Access API),
+   no drag-reorder, no version history beyond CodeMirror's own undo stack,
+   no virtual-scroll for very large note counts. Everything else — nested
+   folders, tags, full-text search, [[wikilinks]] with autocomplete and
+   backlinks, GFM + Mermaid + KaTeX preview, templates, export — is real.
+   ========================================================================= */
+registerTool({
+  id:'notes-tool', name:'Markdown Notes', category:'Notes Workspace', icon:'✎',
+  mount(container, api){
+    const NOTES_KEY = 'toolbench_notes_v1';
+    const TAG_PALETTE = ['#6c8dff','#4fd18b','#e8a33d','#f0616d','#a78bfa','#38bdf8','#fb923c','#34d399'];
+    function tagColor(tag){
+      let h=0; for (let i=0;i<tag.length;i++) h = (h*31 + tag.charCodeAt(i))>>>0;
+      return TAG_PALETTE[h % TAG_PALETTE.length];
+    }
+    function loadData(){
+      try{
+        const raw = localStorage.getItem(NOTES_KEY);
+        if (raw) return JSON.parse(raw);
+      }catch(e){}
+      const welcomeId = uid();
+      return {
+        folders: [{id:'f-projects', name:'Projects', parentId:null}, {id:'f-personal', name:'Personal', parentId:null}],
+        notes: [{id:welcomeId, title:'Welcome to Notes', folderId:null, content:
+          '# Welcome to Markdown Notes\n\nThis is a local, offline notes workspace built into Toolbench.\n\n## Try it out\n\n- Type Markdown on the left, see it rendered on the right\n- Link to another note with `[[Project Ideas]]` — type `[[` for suggestions\n- Add tags below the title\n- Use the template picker in the toolbar to start from a README, meeting notes, a bug report, and more\n\n```js\nconsole.log("code blocks are syntax-highlighted");\n```\n\n| Feature | Status |\n|---|---|\n| Tags | ✅ |\n| Backlinks | ✅ |\n| Mermaid | ✅ |\n\n- [x] Read this note\n- [ ] Create your own\n',
+          tags:['guide'], favorite:true, pinned:false, createdAt:Date.now(), updatedAt:Date.now()}],
+        activeNoteId: welcomeId
+      };
+    }
+    let data = loadData();
+    function save(){ try{ localStorage.setItem(NOTES_KEY, JSON.stringify(data)); }catch(e){ toast('Could not save — storage may be full','err'); } }
+
+    container.innerHTML = `
+      <div class="notes-shell">
+        <div class="notes-side">
+          <div class="notes-side-search">
+            <input class="mini" id="notes-search" placeholder="Search notes, tags…">
+            <button class="icon-btn" data-a="new-note" title="New note (in selected folder)">+</button>
+          </div>
+          <div class="notes-side-scroll" id="notes-tree"></div>
+        </div>
+        <div class="notes-main">
+          <div class="notes-toolbar" id="notes-toolbar">
+            <select class="mini" id="notes-template" title="Insert template">
+              <option value="">Template…</option>
+              ${Object.keys(NOTE_TEMPLATES).map(k=>`<option value="${escapeHtml(k)}">${escapeHtml(k)}</option>`).join('')}
+            </select>
+            <span class="tb-sep"></span>
+            <button class="tb-icon" data-a="bold" title="Bold (Ctrl+B)"><b>B</b></button>
+            <button class="tb-icon" data-a="italic" title="Italic (Ctrl+I)"><i>i</i></button>
+            <button class="tb-icon" data-a="code" title="Inline code">&lt;/&gt;</button>
+            <button class="tb-icon" data-a="link" title="Insert link (Ctrl+L)">&#128279;</button>
+            <button class="tb-icon" data-a="table" title="Insert table">&#9638;</button>
+            <button class="tb-icon" data-a="check" title="Insert task item">&#9745;</button>
+            <span class="tb-sep"></span>
+            <button class="tb-icon" data-a="find" title="Find & replace (Ctrl+F)">&#128269;</button>
+            <span class="grow"></span>
+            <button class="tb-icon" data-mode="editor" title="Editor only">&#9776;</button>
+            <button class="tb-icon" data-mode="split" title="Split view">&#9707;</button>
+            <button class="tb-icon" data-mode="preview" title="Preview only">&#128065;</button>
+            <span class="tb-sep"></span>
+            <select class="mini" id="notes-export" title="Export">
+              <option value="">Export…</option>
+              <option value="md">Markdown (.md)</option>
+              <option value="html">HTML (.html)</option>
+              <option value="txt">Plain text (.txt)</option>
+              <option value="print">Print / PDF…</option>
+            </select>
+          </div>
+          <div class="field-row" id="notes-findbar" style="display:none;background:var(--bg-elevated)">
+            <input class="mini" id="find-q" placeholder="Find" style="width:160px">
+            <input class="mini" id="find-r" placeholder="Replace with" style="width:160px">
+            <label class="toggle-row"><input type="checkbox" id="find-regex"> regex</label>
+            <button class="btn ghost" data-a="find-next">Next</button>
+            <button class="btn ghost" data-a="find-replace">Replace</button>
+            <button class="btn ghost" data-a="find-replace-all">Replace all</button>
+            <span class="grow"></span>
+            <button class="icon-btn" data-a="find-close">✕</button>
+          </div>
+          <div class="notes-editcol" id="notes-editcol">
+            <div class="empty-note-state" id="notes-empty">
+              <div style="font-size:26px">✎</div>
+              <div>No note open</div>
+              <button class="btn primary" data-a="new-note-2">New note</button>
+            </div>
+          </div>
+          <div class="notes-statusbar" id="notes-statusbar"></div>
+        </div>
+      </div>`;
+
+    let cm = null, activeNote = null, viewMode = 'split', depsLoaded = false, mermaidTick = 0;
+
+    function findNote(id){ return data.notes.find(n=>n.id===id); }
+    function folderChildren(parentId){ return data.folders.filter(f=>f.parentId===parentId); }
+    function notesInFolder(folderId){ return data.notes.filter(n=>n.folderId===folderId); }
+
+    /* ---------------- sidebar tree ---------------- */
+    function renderTree(){
+      const tree = container.querySelector('#notes-tree');
+      tree.innerHTML = '';
+      const q = container.querySelector('#notes-search').value.trim().toLowerCase();
+
+      if (q){
+        const matches = data.notes.filter(n =>
+          n.title.toLowerCase().includes(q) ||
+          n.content.toLowerCase().includes(q) ||
+          n.tags.some(t=>t.toLowerCase().includes(q))
+        );
+        tree.appendChild(el('div',{class:'notes-section-title'}, `Search results (${matches.length})`));
+        matches.forEach(n=>tree.appendChild(noteRow(n)));
+        return;
+      }
+
+      const favs = data.notes.filter(n=>n.favorite);
+      if (favs.length){
+        tree.appendChild(el('div',{class:'notes-section-title'},'Favorites'));
+        favs.forEach(n=>tree.appendChild(noteRow(n)));
+      }
+
+      function renderFolder(parentId, depth){
+        folderChildren(parentId).forEach(f=>{
+          const row = el('div',{class:'folder-row', style:`padding-left:${8+depth*12}px`},
+            el('span',{},'\u25B8'), el('span',{style:'flex:1'}, f.name),
+            el('span',{class:'icon-btn', title:'New note here', onclick:(e)=>{e.stopPropagation(); createNote(f.id);}}, '+'),
+            el('span',{class:'icon-btn', title:'Rename', onclick:(e)=>{e.stopPropagation(); renameFolder(f.id);}}, '\u270E'),
+            el('span',{class:'icon-btn', title:'Delete folder', onclick:(e)=>{e.stopPropagation(); deleteFolder(f.id);}}, '\u2715')
+          );
+          tree.appendChild(row);
+          renderFolder(f.id, depth+1);
+          notesInFolder(f.id).filter(n=>!n.favorite).forEach(n=>tree.appendChild(noteRow(n, depth+1)));
+        });
+      }
+      tree.appendChild(el('div',{class:'notes-section-title'},
+        el('span',{},'Folders'),
+        el('span',{class:'icon-btn', title:'New folder', onclick:()=>createFolder(null)}, '+')));
+      renderFolder(null, 0);
+
+      const rootNotes = notesInFolder(null).filter(n=>!n.favorite);
+      if (rootNotes.length){
+        tree.appendChild(el('div',{class:'notes-section-title'},'Unfiled'));
+        rootNotes.forEach(n=>tree.appendChild(noteRow(n)));
+      }
+
+      const tagCounts = {};
+      data.notes.forEach(n=>n.tags.forEach(t=>tagCounts[t]=(tagCounts[t]||0)+1));
+      const tagNames = Object.keys(tagCounts);
+      if (tagNames.length){
+        tree.appendChild(el('div',{class:'notes-section-title'},'Tags'));
+        const wrap = el('div',{style:'display:flex;flex-wrap:wrap;gap:5px;padding:2px 10px 8px'});
+        tagNames.forEach(t=>{
+          const chip = el('span',{class:'chip', style:`border-color:${tagColor(t)}55;color:${tagColor(t)}`}, `${t} (${tagCounts[t]})`);
+          chip.addEventListener('click', ()=>{ container.querySelector('#notes-search').value = t; renderTree(); });
+          wrap.appendChild(chip);
+        });
+        tree.appendChild(wrap);
+      }
+    }
+    function noteRow(n, depth){
+      const row = el('div',{class:'note-row'+(activeNote && n.id===activeNote.id?' active':''), style: depth?`padding-left:${8+depth*12}px`:''},
+        el('span',{class:'dot', style:`background:${n.tags[0]?tagColor(n.tags[0]):'var(--text-dim)'}`}),
+        el('span',{class:'nm'}, n.title || 'Untitled'),
+        n.pinned ? el('span',{class:'pin'},'\u2605') : null
+      );
+      row.addEventListener('click', ()=>openNote(n.id));
+      return row;
+    }
+
+    /* ---------------- CRUD ---------------- */
+    function createFolder(parentId){
+      const name = prompt('Folder name:');
+      if (!name) return;
+      data.folders.push({id:uid(), name:name.trim(), parentId});
+      save(); renderTree();
+    }
+    function renameFolder(id){
+      const f = data.folders.find(x=>x.id===id); if (!f) return;
+      const name = prompt('Rename folder:', f.name);
+      if (!name) return;
+      f.name = name.trim(); save(); renderTree();
+    }
+    function deleteFolder(id){
+      if (!confirm('Delete this folder? Notes and sub-folders inside will move to Unfiled.')) return;
+      data.folders.filter(f=>f.parentId===id).forEach(f=>f.parentId=null);
+      data.notes.filter(n=>n.folderId===id).forEach(n=>n.folderId=null);
+      data.folders = data.folders.filter(f=>f.id!==id);
+      save(); renderTree();
+    }
+    function createNote(folderId){
+      const n = {id:uid(), title:'Untitled note', folderId: folderId||null, content:'', tags:[], favorite:false, pinned:false, createdAt:Date.now(), updatedAt:Date.now()};
+      data.notes.unshift(n); save(); renderTree(); openNote(n.id);
+      setTimeout(()=>container.querySelector('#note-title')?.select(), 30);
+    }
+    function deleteNote(id){
+      if (!confirm('Delete this note? This cannot be undone.')) return;
+      data.notes = data.notes.filter(n=>n.id!==id);
+      if (data.activeNoteId===id){ data.activeNoteId=null; activeNote=null; }
+      save(); renderTree(); renderEditArea();
+    }
+    function findOrCreateByTitle(title){
+      let n = data.notes.find(x=>x.title.trim().toLowerCase()===title.trim().toLowerCase());
+      if (!n){
+        n = {id:uid(), title:title.trim(), folderId:null, content:'', tags:[], favorite:false, pinned:false, createdAt:Date.now(), updatedAt:Date.now()};
+        data.notes.unshift(n); save(); renderTree();
+      }
+      return n;
+    }
+
+    /* ---------------- editor / preview area ---------------- */
+    function renderEditArea(){
+      const col = container.querySelector('#notes-editcol');
+      if (!activeNote){
+        col.innerHTML = `<div class="empty-note-state" id="notes-empty"><div style="font-size:26px">✎</div><div>No note open</div><button class="btn primary" data-a="new-note-2">New note</button></div>`;
+        col.querySelector('[data-a="new-note-2"]').addEventListener('click', ()=>createNote(null));
+        container.querySelector('#notes-statusbar').textContent = '';
+        cm = null;
+        return;
+      }
+      col.innerHTML = `
+        <div class="notes-editpane" id="pane-edit">
+          <input class="note-title-input" id="note-title" value="${escapeHtml(activeNote.title)}" placeholder="Untitled note">
+          <div class="note-meta-row">
+            <div id="note-tags" style="display:flex;gap:5px;flex-wrap:wrap;align-items:center;flex:1"></div>
+            <input class="note-tag-input" id="note-tag-add" placeholder="+ tag">
+            <button class="icon-btn" id="note-fav" title="Favorite">${activeNote.favorite?'\u2605':'\u2606'}</button>
+            <button class="icon-btn" id="note-pin" title="Pin">${activeNote.pinned?'\u{1F4CC}':'\u{1F4CD}'}</button>
+            <button class="icon-btn" id="note-del" title="Delete note">\u2715</button>
+          </div>
+          <div class="cm-wrap" id="notes-cm" style="flex:1"></div>
+        </div>
+        <div class="notes-prevpane" id="pane-prev">
+          <div class="notes-preview" id="notes-preview-body"></div>
+          <div class="notes-outline" id="notes-outline"></div>
+          <div class="notes-backlinks" id="notes-backlinks"></div>
+        </div>`;
+      renderTagChips();
+      col.querySelector('#note-title').addEventListener('input', debounce(e=>{ activeNote.title = e.target.value; scheduleSave(); renderTree(); },200));
+      col.querySelector('#note-fav').addEventListener('click', ()=>{ activeNote.favorite=!activeNote.favorite; scheduleSave(true); renderTree(); renderEditArea(); });
+      col.querySelector('#note-pin').addEventListener('click', ()=>{ activeNote.pinned=!activeNote.pinned; scheduleSave(true); renderTree(); });
+      col.querySelector('#note-del').addEventListener('click', ()=>deleteNote(activeNote.id));
+      col.querySelector('#note-tag-add').addEventListener('keydown', e=>{
+        if (e.key==='Enter' && e.target.value.trim()){
+          const t = e.target.value.trim().toLowerCase();
+          if (!activeNote.tags.includes(t)) activeNote.tags.push(t);
+          e.target.value=''; scheduleSave(true); renderTagChips(); renderTree();
+        }
+      });
+
+      cm = CodeMirror(col.querySelector('#notes-cm'), {
+        mode:'markdown', lineNumbers:false, lineWrapping:true, theme: STATE.theme==='dark'?'material-darker':'default',
+        value: activeNote.content, viewportMargin: 500, indentUnit: STATE.indent, tabSize: STATE.indent
+      });
+      cm.on('change', ()=>{ activeNote.content = cm.getValue(); scheduleSave(); renderPreviewDebounced(); updateStatusbar(); });
+      cm.on('cursorActivity', updateStatusbar);
+      wireWikilinkAutocomplete();
+      wireDropPaste();
+      applyMode();
+      renderPreview();
+      updateStatusbar();
+      setTimeout(()=>cm.refresh(), 30);
+    }
+    function renderTagChips(){
+      const wrap = container.querySelector('#note-tags'); if (!wrap) return;
+      wrap.innerHTML = '';
+      activeNote.tags.forEach(t=>{
+        const chip = el('span',{class:'tag-chip', style:`background:${tagColor(t)}22;color:${tagColor(t)}`},
+          t, el('span',{style:'cursor:pointer', onclick:()=>{ activeNote.tags = activeNote.tags.filter(x=>x!==t); scheduleSave(true); renderTagChips(); renderTree(); }}, ' \u2715'));
+        wrap.appendChild(chip);
+      });
+    }
+    let saveTimer=null;
+    function scheduleSave(immediate){
+      activeNote.updatedAt = Date.now();
+      clearTimeout(saveTimer);
+      if (immediate){ save(); return; }
+      saveTimer = setTimeout(save, 400);
+    }
+
+    function openNote(id){
+      activeNote = findNote(id);
+      data.activeNoteId = id;
+      save();
+      renderEditArea();
+      renderTree();
+      api.setTitle(activeNote ? activeNote.title.slice(0,24) || 'Untitled' : 'Markdown Notes');
+    }
+
+    /* ---------------- view modes ---------------- */
+    function applyMode(){
+      const edit = container.querySelector('#pane-edit'), prev = container.querySelector('#pane-prev');
+      if (!edit || !prev) return;
+      edit.style.display = viewMode==='preview' ? 'none' : 'flex';
+      prev.style.display = viewMode==='editor' ? 'none' : 'flex';
+      container.querySelectorAll('[data-mode]').forEach(b=>b.style.color = b.getAttribute('data-mode')===viewMode ? 'var(--accent)' : '');
+      if (cm) setTimeout(()=>cm.refresh(), 30);
+    }
+    container.querySelectorAll('[data-mode]').forEach(b=>b.addEventListener('click', ()=>{ viewMode=b.getAttribute('data-mode'); applyMode(); }));
+
+    /* ---------------- markdown rendering pipeline ---------------- */
+    function wikilinkPreprocess(md){
+      return md.replace(/\[\[([^\]|]+)\]\]/g, (m,title)=>{
+        const t = title.trim();
+        const exists = !!data.notes.find(n=>n.title.trim().toLowerCase()===t.toLowerCase());
+        return `<a href="#" class="wikilink${exists?'':' broken'}" data-title="${escapeHtml(t)}">${escapeHtml(t)}</a>`;
+      });
+    }
+    async function renderPreview(){
+      const body = container.querySelector('#notes-preview-body');
+      if (!body || !activeNote) return;
+      if (!depsLoaded){
+        body.innerHTML = '<div style="color:var(--text-dim)">Loading preview engine…</div>';
+        try{ await loadNotesDeps(); depsLoaded = true; }
+        catch(e){ body.innerHTML = '<div style="color:var(--danger)">Could not load preview libraries — check your connection.</div>'; return; }
+        if (!activeNote) return;
+      }
+      let html;
+      try{
+        const pre = wikilinkPreprocess(activeNote.content || '*Nothing here yet — start typing on the left.*');
+        html = marked.parse(pre, {gfm:true, breaks:false});
+        html = DOMPurify.sanitize(html, {ADD_ATTR:['data-title','class','target'], ADD_TAGS:['iframe']});
+      }catch(e){ html = '<div style="color:var(--danger)">Render error: '+escapeHtml(e.message)+'</div>'; }
+      body.innerHTML = html;
+
+      // code highlighting + copy buttons
+      body.querySelectorAll('pre code').forEach(block=>{
+        if (block.className.includes('language-mermaid')) return;
+        try{ hljs.highlightElement(block); }catch(e){}
+        const pre = block.parentElement;
+        if (pre && !pre.querySelector('.copy-code-btn')){
+          const btn = el('button',{class:'copy-code-btn'},'Copy');
+          btn.addEventListener('click', ()=>copyText(block.textContent));
+          pre.appendChild(btn);
+        }
+      });
+      // mermaid
+      const mermaidBlocks = body.querySelectorAll('code.language-mermaid');
+      if (mermaidBlocks.length && window.mermaid){
+        mermaidBlocks.forEach(block=>{
+          const div = document.createElement('div');
+          div.className = 'mermaid'; div.textContent = block.textContent;
+          block.closest('pre').replaceWith(div);
+        });
+        try{ mermaidTick++; await mermaid.run({nodes: body.querySelectorAll('.mermaid')}); }catch(e){ /* leave raw text if a diagram is malformed */ }
+      }
+      // KaTeX
+      if (window.renderMathInElement){
+        try{
+          renderMathInElement(body, {delimiters:[
+            {left:'$$', right:'$$', display:true}, {left:'$', right:'$', display:false}
+          ], throwOnError:false});
+        }catch(e){}
+      }
+      // wikilinks
+      body.querySelectorAll('a.wikilink').forEach(a=>{
+        a.addEventListener('click', (e)=>{
+          e.preventDefault();
+          const title = a.getAttribute('data-title');
+          const n = findOrCreateByTitle(title);
+          openNote(n.id);
+        });
+      });
+      renderOutline(body);
+      renderBacklinks();
+    }
+    const renderPreviewDebounced = debounce(renderPreview, 260);
+
+    function renderOutline(body){
+      const box = container.querySelector('#notes-outline'); if (!box) return;
+      const heads = body.querySelectorAll('h1,h2,h3,h4');
+      box.innerHTML = '';
+      if (!heads.length) return;
+      box.appendChild(el('div',{style:'font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--text-dim);padding:2px 6px 4px'},'Outline'));
+      heads.forEach((h,i)=>{
+        h.id = h.id || ('outline-'+i);
+        const depth = +h.tagName[1];
+        const row = el('div',{style:`padding-left:${(depth-1)*10}px`}, h.textContent);
+        row.addEventListener('click', ()=>h.scrollIntoView({behavior:'smooth', block:'start'}));
+        box.appendChild(row);
+      });
+    }
+    function renderBacklinks(){
+      const box = container.querySelector('#notes-backlinks'); if (!box || !activeNote) return;
+      const title = activeNote.title.trim().toLowerCase();
+      const linkers = data.notes.filter(n=>{
+        if (n.id===activeNote.id) return false;
+        const re = /\[\[([^\]|]+)\]\]/g; let m;
+        while ((m = re.exec(n.content))){ if (m[1].trim().toLowerCase()===title) return true; }
+        return false;
+      });
+      box.innerHTML = '';
+      box.appendChild(el('div',{style:'font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--text-dim);padding:2px 0 4px'},`Backlinks (${linkers.length})`));
+      linkers.forEach(n=>{
+        const item = el('div',{class:'bl-item'}, n.title||'Untitled');
+        item.addEventListener('click', ()=>openNote(n.id));
+        box.appendChild(item);
+      });
+    }
+
+    function updateStatusbar(){
+      const bar = container.querySelector('#notes-statusbar'); if (!bar) return;
+      if (!activeNote || !cm){ bar.textContent=''; return; }
+      const text = cm.getValue();
+      const words = text.trim() ? text.trim().split(/\s+/).length : 0;
+      const chars = text.length;
+      const mins = Math.max(1, Math.round(words/200));
+      const cur = cm.getCursor();
+      bar.innerHTML = '';
+      [`${words} words`, `${chars} chars`, `${mins} min read`, `Ln ${cur.line+1}, Col ${cur.ch+1}`, `Updated ${new Date(activeNote.updatedAt).toLocaleTimeString()}`]
+        .forEach(t=>bar.appendChild(el('span',{},t)));
+    }
+
+    /* ---------------- wikilink autocomplete ---------------- */
+    let hintBox = null;
+    function closeHint(){ if (hintBox){ hintBox.remove(); hintBox=null; } }
+    function wireWikilinkAutocomplete(){
+      cm.on('cursorActivity', ()=>{
+        const cur = cm.getCursor();
+        const line = cm.getLine(cur.line).slice(0, cur.ch);
+        const m = line.match(/\[\[([^\]]*)$/);
+        if (!m){ closeHint(); return; }
+        const q = m[1].toLowerCase();
+        const matches = data.notes.filter(n=>n.title.toLowerCase().includes(q)).slice(0,8);
+        closeHint();
+        if (!matches.length) return;
+        const coords = cm.cursorCoords(cur, 'local');
+        const wrap = cm.getWrapperElement();
+        hintBox = el('div',{class:'wikilink-hint', style:`left:${coords.left}px; top:${coords.bottom+4}px;`});
+        matches.forEach(n=>{
+          const row = el('div',{}, n.title);
+          row.addEventListener('mousedown', (e)=>{
+            e.preventDefault();
+            const from = {line:cur.line, ch: cur.ch - m[1].length};
+            cm.replaceRange(n.title + ']]', from, cur);
+            closeHint(); cm.focus();
+          });
+          hintBox.appendChild(row);
+        });
+        wrap.style.position = 'relative';
+        wrap.appendChild(hintBox);
+      });
+      cm.on('blur', ()=>setTimeout(closeHint, 120));
+    }
+
+    /* ---------------- paste / drop images ---------------- */
+    function wireDropPaste(){
+      function handleFiles(files){
+        [...files].forEach(f=>{
+          if (!f.type.startsWith('image/')) return;
+          const reader = new FileReader();
+          reader.onload = ()=>{
+            const cur = cm.getCursor();
+            cm.replaceRange(`![${f.name}](${reader.result})\n`, cur);
+            toast('Image inserted (embedded as data URL)','ok');
+          };
+          reader.readAsDataURL(f);
+        });
+      }
+      cm.on('paste', (instance, e)=>{ if (e.clipboardData?.files?.length){ handleFiles(e.clipboardData.files); e.preventDefault(); } });
+      cm.getWrapperElement().addEventListener('drop', e=>{
+        if (e.dataTransfer?.files?.length){ e.preventDefault(); handleFiles(e.dataTransfer.files); }
+      });
+    }
+
+    /* ---------------- find & replace ---------------- */
+    function buildRegex(){
+      const q = container.querySelector('#find-q').value;
+      const isRegex = container.querySelector('#find-regex').checked;
+      if (!q) return null;
+      try{ return new RegExp(isRegex ? q : q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'), 'g'); }catch(e){ return null; }
+    }
+    let lastFindIndex = 0;
+    function findNext(){
+      if (!cm) return;
+      const re = buildRegex(); if (!re) return;
+      const text = cm.getValue();
+      re.lastIndex = lastFindIndex;
+      let m = re.exec(text);
+      if (!m){ re.lastIndex = 0; m = re.exec(text); }
+      if (!m){ toast('No matches','err'); return; }
+      const from = cm.posFromIndex(m.index), to = cm.posFromIndex(m.index+m[0].length);
+      cm.setSelection(from, to); cm.scrollIntoView({from,to}, 60);
+      lastFindIndex = m.index + Math.max(1,m[0].length);
+    }
+    function replaceOne(){
+      if (!cm || !cm.somethingSelected()) { findNext(); return; }
+      cm.replaceSelection(container.querySelector('#find-r').value);
+      findNext();
+    }
+    function replaceAll(){
+      if (!cm) return;
+      const re = buildRegex(); if (!re) return;
+      const rep = container.querySelector('#find-r').value;
+      cm.setValue(cm.getValue().replace(re, rep));
+      toast('Replaced all matches','ok');
+    }
+
+    /* ---------------- toolbar wiring ---------------- */
+    function wrapSelection(before, after=before){
+      if (!cm) return;
+      const sel = cm.getSelection();
+      cm.replaceSelection(before + (sel||'text') + after);
+      cm.focus();
+    }
+    container.addEventListener('click', (e)=>{
+      const a = e.target.closest('[data-a]')?.getAttribute('data-a'); if (!a) return;
+      if (a==='bold') wrapSelection('**');
+      else if (a==='italic') wrapSelection('*');
+      else if (a==='code') wrapSelection('`');
+      else if (a==='link') { if (cm){ const sel=cm.getSelection(); cm.replaceSelection(`[${sel||'text'}](url)`); cm.focus(); } }
+      else if (a==='table') { if (cm){ cm.replaceSelection('\n| Col A | Col B |\n|---|---|\n| a | b |\n'); cm.focus(); } }
+      else if (a==='check') { if (cm){ cm.replaceSelection('- [ ] '); cm.focus(); } }
+      else if (a==='find') { const bar=container.querySelector('#notes-findbar'); bar.style.display = bar.style.display==='none'?'flex':'none'; if (bar.style.display==='flex') container.querySelector('#find-q').focus(); }
+      else if (a==='new-note') createNote(null);
+      else if (a==='find-next') findNext();
+      else if (a==='find-replace') replaceOne();
+      else if (a==='find-replace-all') replaceAll();
+      else if (a==='find-close') container.querySelector('#notes-findbar').style.display='none';
+    });
+    container.querySelector('#notes-template').addEventListener('change', e=>{
+      const key = e.target.value; e.target.value='';
+      if (!key || !cm) return;
+      if (cm.getValue().trim() && !confirm('Replace current note content with the "'+key+'" template?')) return;
+      cm.setValue(fillTemplate(NOTE_TEMPLATES[key]));
+    });
+    container.querySelector('#notes-export').addEventListener('change', e=>{
+      const mode = e.target.value; e.target.value=''; if (!mode || !activeNote) return;
+      const safeTitle = (activeNote.title||'note').replace(/[^\w\-]+/g,'_');
+      if (mode==='md') download(safeTitle+'.md', activeNote.content, 'text/markdown');
+      else if (mode==='txt') download(safeTitle+'.txt', activeNote.content, 'text/plain');
+      else if (mode==='html'){
+        const body = container.querySelector('#notes-preview-body').innerHTML;
+        download(safeTitle+'.html', `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(activeNote.title)}</title>\n<style>body{font-family:system-ui,sans-serif;max-width:760px;margin:40px auto;padding:0 20px;line-height:1.6;color:#1c1e26} pre{background:#f4f5f8;padding:10px;border-radius:6px;overflow:auto} code{background:#eef0f5;padding:1px 5px;border-radius:4px} table{border-collapse:collapse} td,th{border:1px solid #ddd;padding:6px 10px}</style>\n</head><body>${body}</body></html>`, 'text/html');
+      }
+      else if (mode==='print'){
+        const body = container.querySelector('#notes-preview-body').innerHTML;
+        const w = window.open('', '_blank');
+        w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(activeNote.title)}</title>
+          <style>body{font-family:system-ui,sans-serif;max-width:760px;margin:30px auto;line-height:1.6}pre{background:#f4f5f8;padding:10px;border-radius:6px;overflow:auto}code{background:#eef0f5;padding:1px 5px;border-radius:4px}table{border-collapse:collapse}td,th{border:1px solid #ddd;padding:6px 10px}</style>
+          </head><body>${body}<script>window.onload=()=>window.print()<\/script></body></html>`);
+        w.document.close();
+      }
+    });
+    container.querySelector('#notes-search').addEventListener('input', debounce(renderTree, 150));
+
+    // tool-scoped shortcuts (only fire while focus is inside this tool, so they never leak to the shell)
+    container.addEventListener('keydown', e=>{
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && e.key.toLowerCase()==='b'){ e.preventDefault(); wrapSelection('**'); }
+      else if (mod && e.key.toLowerCase()==='i'){ e.preventDefault(); wrapSelection('*'); }
+      else if (mod && e.key.toLowerCase()==='l'){ e.preventDefault(); if (cm){ const sel=cm.getSelection(); cm.replaceSelection(`[${sel||'text'}](url)`); } }
+      else if (mod && e.key.toLowerCase()==='f'){ e.preventDefault(); const bar=container.querySelector('#notes-findbar'); bar.style.display='flex'; container.querySelector('#find-q').focus(); }
+    });
+
+    /* ---------------- workspace import/export ---------------- */
+    const wsRow = el('div',{class:'field-row'},
+      el('label',{},'Workspace'),
+      el('button',{class:'btn ghost', onclick:()=>download('toolbench-notes-export.json', JSON.stringify(data,null,2), 'application/json')},'Export all notes'),
+      el('label',{class:'btn ghost', style:'cursor:pointer'}, 'Import…', (()=>{ const inp=el('input',{type:'file', accept:'.json', style:'display:none'});
+        inp.addEventListener('change', async ev=>{
+          const f = ev.target.files[0]; if (!f) return;
+          try{
+            const imported = JSON.parse(await readFileAsText(f));
+            if (!imported.notes || !imported.folders) throw new Error('Not a Toolbench notes export');
+            if (!confirm('Import will replace your current notes workspace. Continue?')) return;
+            data = imported; save(); activeNote=null; renderTree(); renderEditArea();
+            toast('Workspace imported','ok');
+          }catch(err){ toast('Import failed: '+err.message,'err'); }
+        });
+        return inp;
+      })())
+    );
+    container.querySelector('.notes-side').appendChild(wsRow);
+
+    /* ---------------- boot ---------------- */
+    renderTree();
+    if (data.activeNoteId && findNote(data.activeNoteId)) openNote(data.activeNoteId);
+    else renderEditArea();
+
+    container._importText = (text, name)=>{ createNote(null); activeNote.title = name.replace(/\.[^.]+$/,''); activeNote.content = text; renderEditArea(); };
+    return ()=>{ closeHint(); };
+  }
+});
