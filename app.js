@@ -437,6 +437,10 @@ async function sha(algo, str){
   const hash = await crypto.subtle.digest(algo, buf);
   return Array.from(new Uint8Array(hash)).map(b=>b.toString(16).padStart(2,'0')).join('');
 }
+async function shaBytes(algo, bytes){
+  const hash = await crypto.subtle.digest(algo, bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset+bytes.byteLength));
+  return Array.from(new Uint8Array(hash)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
 
 /* ---- Mini JSONPath: supports $, ., [], *, .., [n], [n:m], [?(@.x==y)] ----
    Not the full spec, but covers the common real-world queries. */
@@ -3045,6 +3049,849 @@ registerTool({
     return {
       getState: ()=>({expr: container.querySelector('#cr-expr').value, from: container.querySelector('#cr-from').value}),
       setState: (s)=>{ container.querySelector('#cr-expr').value = s.expr||'* * * * *'; container.querySelector('#cr-from').value = s.from||''; evaluate(); }
+    };
+  }
+});
+
+/* =========================================================================
+   X.509 CERTIFICATE PARSING CORE (pure functions, DOM-independent)
+   Hand-rolled minimal DER/ASN.1 reader — no external crypto/ASN.1 library.
+   Verified field-for-field (version, serial, issuer, subject, validity,
+   SAN, extensions, fingerprints) against real openssl-generated
+   certificates during development; not a general-purpose ASN.1 parser —
+   covers exactly what X.509 v1/v3 certificates need.
+   ========================================================================= */
+function derReadLength(bytes, pos){
+  let b = bytes[pos]; pos++;
+  if ((b & 0x80) === 0) return {length:b, pos};
+  const numBytes = b & 0x7f;
+  if (numBytes === 0) throw new Error('Indefinite length not supported in DER');
+  let len = 0;
+  for (let i=0;i<numBytes;i++){ len = (len*256) + bytes[pos]; pos++; }
+  return {length:len, pos};
+}
+function derReadTLV(bytes, pos){
+  if (pos >= bytes.length) throw new Error('Unexpected end of certificate data');
+  const tagByte = bytes[pos];
+  const tagClass = (tagByte & 0xC0) >> 6;
+  const constructed = !!(tagByte & 0x20);
+  const tag = tagByte & 0x1F;
+  let p = pos+1;
+  const {length, pos:p2} = derReadLength(bytes, p);
+  const contentStart = p2, contentEnd = p2+length;
+  if (contentEnd > bytes.length) throw new Error('Certificate data is truncated or malformed');
+  return {tagByte, tagClass, constructed, tag, length, contentStart, contentEnd, nextPos: contentEnd};
+}
+function derReadAll(bytes, start, end){
+  const out = []; let pos = start;
+  while (pos < end){ const tlv = derReadTLV(bytes, pos); out.push(tlv); pos = tlv.nextPos; }
+  return out;
+}
+function derOid(bytes, start, end){
+  let arcs = [];
+  const first = bytes[start];
+  if (first < 40) arcs.push(0, first);
+  else if (first < 80) arcs.push(1, first-40);
+  else arcs.push(2, first-80);
+  let val = 0;
+  for (let i=start+1; i<end; i++){
+    val = val*128 + (bytes[i] & 0x7f);
+    if (!(bytes[i] & 0x80)){ arcs.push(val); val = 0; }
+  }
+  return arcs.join('.');
+}
+function derInt(bytes, start, end){
+  let hex = '';
+  for (let i=start;i<end;i++) hex += bytes[i].toString(16).padStart(2,'0');
+  return hex.replace(/^00/,'') || '00';
+}
+function derIntSmall(bytes, start, end){ let v=0; for (let i=start;i<end;i++) v = v*256+bytes[i]; return v; }
+function derBytesToAscii(bytes, start, end){ let s=''; for (let i=start;i<end;i++) s += String.fromCharCode(bytes[i]); return s; }
+function derUtf8(bytes, start, end){ return new TextDecoder('utf-8').decode(bytes.slice(start,end)); }
+function derTime(bytes, tlv){
+  const s = derBytesToAscii(bytes, tlv.contentStart, tlv.contentEnd);
+  let y,mo,d,h,mi,se;
+  if (tlv.tag === 23){ let yy=+s.slice(0,2); y = yy<50 ? 2000+yy : 1900+yy; mo=+s.slice(2,4); d=+s.slice(4,6); h=+s.slice(6,8); mi=+s.slice(8,10); se=+s.slice(10,12); }
+  else { y=+s.slice(0,4); mo=+s.slice(4,6); d=+s.slice(6,8); h=+s.slice(8,10); mi=+s.slice(10,12); se=+s.slice(12,14); }
+  return new Date(Date.UTC(y, mo-1, d, h, mi, se));
+}
+const X509_ATTR_NAMES = {'2.5.4.3':'CN','2.5.4.6':'C','2.5.4.7':'L','2.5.4.8':'ST','2.5.4.10':'O','2.5.4.11':'OU','2.5.4.5':'serialNumber','2.5.4.9':'STREET','2.5.4.17':'postalCode','1.2.840.113549.1.9.1':'emailAddress'};
+const X509_SIGALG_NAMES = {'1.2.840.113549.1.1.5':'sha1WithRSAEncryption','1.2.840.113549.1.1.11':'sha256WithRSAEncryption','1.2.840.113549.1.1.12':'sha384WithRSAEncryption','1.2.840.113549.1.1.13':'sha512WithRSAEncryption','1.2.840.10045.4.3.2':'ecdsa-with-SHA256','1.2.840.10045.4.3.3':'ecdsa-with-SHA384','1.2.840.10045.4.3.4':'ecdsa-with-SHA512','1.2.840.113549.1.1.1':'rsaEncryption'};
+const X509_EXT_NAMES = {'2.5.29.17':'subjectAltName','2.5.29.15':'keyUsage','2.5.29.19':'basicConstraints','2.5.29.14':'subjectKeyIdentifier','2.5.29.35':'authorityKeyIdentifier','2.5.29.37':'extKeyUsage','2.5.29.31':'cRLDistributionPoints','2.5.29.32':'certificatePolicies','1.3.6.1.5.5.7.1.1':'authorityInfoAccess'};
+function derParseName(bytes, start, end){
+  const rdns = derReadAll(bytes, start, end);
+  const parts = [];
+  rdns.forEach(rdnSet=>{
+    derReadAll(bytes, rdnSet.contentStart, rdnSet.contentEnd).forEach(atv=>{
+      const kv = derReadAll(bytes, atv.contentStart, atv.contentEnd);
+      const oid = derOid(bytes, kv[0].contentStart, kv[0].contentEnd);
+      const v = kv[1];
+      const value = (v.tag===12) ? derUtf8(bytes, v.contentStart, v.contentEnd) : derBytesToAscii(bytes, v.contentStart, v.contentEnd);
+      parts.push({oid, name: X509_ATTR_NAMES[oid]||oid, value});
+    });
+  });
+  return parts;
+}
+function x509NameToString(parts){ return parts.map(p=>`${p.name}=${p.value}`).join(', '); }
+function derParseSAN(bytes, extnValueBytes){
+  const seq = derReadTLV(extnValueBytes, 0);
+  return derReadAll(extnValueBytes, seq.contentStart, seq.contentEnd).map(n=>{
+    if (n.tagClass!==2) return {type:'other', value:'(unsupported)'};
+    switch(n.tag){
+      case 1: return {type:'email', value: derBytesToAscii(extnValueBytes, n.contentStart, n.contentEnd)};
+      case 2: return {type:'DNS', value: derBytesToAscii(extnValueBytes, n.contentStart, n.contentEnd)};
+      case 6: return {type:'URI', value: derBytesToAscii(extnValueBytes, n.contentStart, n.contentEnd)};
+      case 7: {
+        const len = n.contentEnd-n.contentStart;
+        if (len===4) return {type:'IP', value: Array.from(extnValueBytes.slice(n.contentStart,n.contentEnd)).join('.')};
+        if (len===16){ const g=[]; for (let i=0;i<16;i+=2) g.push(((extnValueBytes[n.contentStart+i]<<8)|extnValueBytes[n.contentStart+i+1]).toString(16)); return {type:'IP', value:g.join(':')}; }
+        return {type:'IP', value:'(unrecognized length)'};
+      }
+      default: return {type:'other('+n.tag+')', value:'(not decoded)'};
+    }
+  });
+}
+function parseCertificateDER(bytes){
+  const cert = derReadTLV(bytes, 0);
+  const certParts = derReadAll(bytes, cert.contentStart, cert.contentEnd);
+  const tbs = certParts[0];
+  const tbsChildren = derReadAll(bytes, tbs.contentStart, tbs.contentEnd);
+  let idx=0, version=1;
+  if (tbsChildren[idx].tagClass===2 && tbsChildren[idx].tag===0){
+    const inner = derReadTLV(bytes, tbsChildren[idx].contentStart);
+    version = derIntSmall(bytes, inner.contentStart, inner.contentEnd)+1;
+    idx++;
+  }
+  const serialTlv = tbsChildren[idx++];
+  const serialHex = derInt(bytes, serialTlv.contentStart, serialTlv.contentEnd);
+  const sigAlgTlv = tbsChildren[idx++];
+  const sigAlgChildren = derReadAll(bytes, sigAlgTlv.contentStart, sigAlgTlv.contentEnd);
+  const sigAlgOid = derOid(bytes, sigAlgChildren[0].contentStart, sigAlgChildren[0].contentEnd);
+  const issuer = derParseName(bytes, tbsChildren[idx].contentStart, tbsChildren[idx].contentEnd); idx++;
+  const validityChildren = derReadAll(bytes, tbsChildren[idx].contentStart, tbsChildren[idx].contentEnd); idx++;
+  const notBefore = derTime(bytes, validityChildren[0]), notAfter = derTime(bytes, validityChildren[1]);
+  const subject = derParseName(bytes, tbsChildren[idx].contentStart, tbsChildren[idx].contentEnd); idx++;
+  idx++; // subjectPublicKeyInfo — not decoded in detail
+  let extensions = [];
+  for (; idx<tbsChildren.length; idx++){
+    const t = tbsChildren[idx];
+    if (t.tagClass===2 && t.tag===3){
+      const extSeq = derReadTLV(bytes, t.contentStart);
+      extensions = derReadAll(bytes, extSeq.contentStart, extSeq.contentEnd).map(extTlv=>{
+        const children = derReadAll(bytes, extTlv.contentStart, extTlv.contentEnd);
+        const oid = derOid(bytes, children[0].contentStart, children[0].contentEnd);
+        let critical=false, vi=1;
+        if (children[1].tag===1){ critical = bytes[children[1].contentStart]!==0; vi=2; }
+        const octetTlv = children[vi];
+        const valueBytes = bytes.slice(octetTlv.contentStart, octetTlv.contentEnd);
+        let summary=null, san=null;
+        if (oid==='2.5.29.17'){ san = derParseSAN(bytes, valueBytes); summary = san.map(s=>`${s.type}:${s.value}`).join(', '); }
+        else summary = Array.from(valueBytes.slice(0,40)).map(b=>b.toString(16).padStart(2,'0')).join(':') + (valueBytes.length>40?'…':'');
+        return {oid, name: X509_EXT_NAMES[oid]||oid, critical, summary, san};
+      });
+    }
+  }
+  return {
+    version, serialHex, sigAlgOid, sigAlgName: X509_SIGALG_NAMES[sigAlgOid]||sigAlgOid,
+    issuer, issuerStr: x509NameToString(issuer), subject, subjectStr: x509NameToString(subject),
+    notBefore, notAfter, extensions, san: (extensions.find(e=>e.oid==='2.5.29.17')||{}).san || [],
+  };
+}
+function pemBlocksToDER(pemText){
+  const blocks = [];
+  const re = /-----BEGIN CERTIFICATE-----([\s\S]*?)-----END CERTIFICATE-----/g;
+  let m;
+  while ((m = re.exec(pemText))){
+    const b64 = m[1].replace(/\s+/g,'');
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i=0;i<bin.length;i++) bytes[i] = bin.charCodeAt(i);
+    blocks.push(bytes);
+  }
+  return blocks;
+}
+
+registerTool({
+  id:'x509-tool', name:'X.509 Certificate Decoder', category:'Developer Utilities', icon:'\u{1F512}',
+  mount(container, api){
+    container.innerHTML = `
+      <div class="tool-shell">
+        <div class="tool-toolbar"><span style="font-size:12px;color:var(--text-dim)">Paste one or more PEM certificates — parsing happens entirely in your browser.</span></div>
+        <div class="tool-body" style="flex-direction:column">
+          <textarea class="plain-textarea" id="x5-in" style="flex:0 0 160px;font-size:11.5px" placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----"></textarea>
+          <div class="err-banner" id="x5-err"></div>
+          <div class="tool-toolbar" id="x5-chain-tabs" style="display:none"></div>
+          <div id="x5-out" style="flex:1;overflow:auto;padding:14px"></div>
+        </div>
+      </div>`;
+    let certs = [], activeIdx = 0;
+    function fieldTable(rows){
+      const t = el('table',{class:'kv'});
+      rows.forEach(([k,v])=>t.appendChild(el('tr',{}, el('td',{},k), el('td',{}, v))));
+      return t;
+    }
+    async function renderCert(i){
+      const c = certs[i];
+      const box = container.querySelector('#x5-out'); box.innerHTML='';
+      const now = new Date();
+      const expired = now > c.notAfter, notYetValid = now < c.notBefore;
+      const validityBadge = expired ? el('span',{class:'pill err'},'Expired') : notYetValid ? el('span',{class:'pill err'},'Not yet valid') : el('span',{class:'pill ok'},'Valid');
+
+      const card1 = el('div',{class:'card', style:'margin-bottom:12px'});
+      card1.appendChild(el('h4',{}, 'Certificate'));
+      card1.appendChild(fieldTable([
+        ['Version', 'v'+c.version],
+        ['Serial Number', c.serialHex],
+        ['Signature Algorithm', c.sigAlgName],
+        ['Subject', c.subjectStr],
+        ['Issuer', c.issuerStr],
+        ['Self-signed', c.subjectStr===c.issuerStr ? 'Yes' : 'No'],
+      ]));
+      box.appendChild(card1);
+
+      const card2 = el('div',{class:'card', style:'margin-bottom:12px'});
+      card2.appendChild(el('h4',{},'Validity'));
+      const vRow = el('div',{style:'display:flex;align-items:center;gap:10px;margin-bottom:8px'}, validityBadge, el('span',{style:'color:var(--text-dim);font-size:11.5px'}, `${c.notBefore.toLocaleString()} \u2192 ${c.notAfter.toLocaleString()}`));
+      card2.appendChild(vRow);
+      card2.appendChild(fieldTable([['Valid From', c.notBefore.toISOString()], ['Valid Until', c.notAfter.toISOString()]]));
+      box.appendChild(card2);
+
+      if (c.san.length){
+        const card3 = el('div',{class:'card', style:'margin-bottom:12px'});
+        card3.appendChild(el('h4',{},'Subject Alternative Names'));
+        const list = el('div',{style:'display:flex;flex-direction:column;gap:4px;font-family:var(--mono);font-size:12px'});
+        c.san.forEach(s=>list.appendChild(el('div',{}, `${s.type}: ${s.value}`)));
+        card3.appendChild(list);
+        box.appendChild(card3);
+      }
+
+      if (c.extensions.length){
+        const card4 = el('div',{class:'card', style:'margin-bottom:12px'});
+        card4.appendChild(el('h4',{},'Extensions'));
+        const t = el('table',{class:'kv'});
+        c.extensions.forEach(e=>{
+          t.appendChild(el('tr',{}, el('td',{}, e.name + (e.critical?' (critical)':'')), el('td',{style:'font-family:var(--mono);font-size:11px;word-break:break-all'}, e.summary)));
+        });
+        card4.appendChild(t);
+        box.appendChild(card4);
+      }
+
+      const card5 = el('div',{class:'card'});
+      card5.appendChild(el('h4',{},'Fingerprints'));
+      const sha1fp = await shaBytes('SHA-1', c._bytes);
+      const sha256fp = await shaBytes('SHA-256', c._bytes);
+      const fpRow = (label,val) => el('div',{class:'hash-row', style:'margin-bottom:6px'}, el('span',{class:'algo'},label), el('span',{class:'val'}, val.match(/.{2}/g).join(':')), el('span',{class:'icon-btn', onclick:()=>copyText(val)}, '⧉'));
+      card5.appendChild(fpRow('SHA-1', sha1fp));
+      card5.appendChild(fpRow('SHA-256', sha256fp));
+      box.appendChild(card5);
+
+      api.setStatus(expired ? 'Certificate expired' : notYetValid ? 'Not yet valid' : 'Valid certificate', !expired && !notYetValid);
+    }
+    function renderChainTabs(){
+      const tabs = container.querySelector('#x5-chain-tabs');
+      if (certs.length<=1){ tabs.style.display='none'; return; }
+      tabs.style.display='flex';
+      tabs.innerHTML = '';
+      certs.forEach((c,i)=>{
+        const b = el('button',{class:'btn'+(i===activeIdx?' primary':'')}, `#${i+1} ${c.subject.find(p=>p.oid==='2.5.4.3')?.value || 'cert'}`);
+        b.addEventListener('click', ()=>{ activeIdx=i; renderChainTabs(); renderCert(i); });
+        tabs.appendChild(b);
+      });
+    }
+    async function parse(){
+      const bnr = container.querySelector('#x5-err');
+      const text = container.querySelector('#x5-in').value;
+      if (!text.trim()){ bnr.classList.remove('show'); container.querySelector('#x5-out').innerHTML=''; certs=[]; renderChainTabs(); return; }
+      try{
+        const blocks = pemBlocksToDER(text);
+        if (!blocks.length) throw new Error('No "-----BEGIN CERTIFICATE-----" block found');
+        certs = blocks.map(bytes=>{ const c = parseCertificateDER(bytes); c._bytes = bytes; return c; });
+        activeIdx = 0;
+        bnr.classList.remove('show');
+        renderChainTabs();
+        await renderCert(0);
+      }catch(e){
+        bnr.textContent = 'Could not parse certificate: '+e.message; bnr.classList.add('show');
+        container.querySelector('#x5-out').innerHTML=''; api.setStatus('Parse error', false);
+      }
+    }
+    container.querySelector('#x5-in').addEventListener('input', debounce(parse, 300));
+    container._importText = (text)=>{ container.querySelector('#x5-in').value = text; parse(); };
+    return {
+      getState: ()=>({input: container.querySelector('#x5-in').value}),
+      setState: (s)=>{ container.querySelector('#x5-in').value = s.input||''; parse(); }
+    };
+  }
+});
+
+/* =========================================================================
+   TOOL: QR Code Generator & Reader
+   Lazy-loads 'qrcode' (generation) and 'jsQR' (image/webcam decoding) the
+   first time this tool is opened.
+   ========================================================================= */
+async function loadQrDeps(){
+  await Promise.all([
+    loadScript('https://cdnjs.cloudflare.com/ajax/libs/qrcode/1.4.4/qrcode.min.js'),
+    loadScript('https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js'),
+  ]);
+}
+registerTool({
+  id:'qr-tool', name:'QR Code Generator & Reader', category:'Developer Utilities', icon:'\u2610',
+  mount(container, api){
+    container.innerHTML = `
+      <div class="tool-shell">
+        <div class="tool-toolbar">
+          <button class="btn primary" data-a="mode-gen">Generate</button>
+          <button class="btn" data-a="mode-read">Read / Scan</button>
+        </div>
+        <div class="err-banner" id="qr-err"></div>
+        <div id="qr-body" style="flex:1;overflow:auto;padding:14px"></div>
+      </div>`;
+    let depsLoaded = false, mode = 'gen', stream = null, scanRAF = null;
+    async function ensureDeps(){
+      if (depsLoaded) return true;
+      try{ await loadQrDeps(); depsLoaded = true; return true; }
+      catch(e){
+        const bnr = container.querySelector('#qr-err');
+        bnr.textContent = 'Could not load the QR library from the CDN — check your internet connection and reload. ('+e.message+')';
+        bnr.classList.add('show');
+        api.setStatus('Failed to load QR library', false);
+        return false;
+      }
+    }
+
+    function renderGen(){
+      const box = container.querySelector('#qr-body'); box.innerHTML = `
+        <div class="grid-2" style="grid-template-columns:1fr 1fr">
+          <div class="card">
+            <h4>Content</h4>
+            <div class="field-row" style="padding:0 0 8px"><label style="min-width:70px">Type</label>
+              <select class="mini grow" id="qr-type">
+                <option value="text">Text / URL</option>
+                <option value="email">Email</option>
+                <option value="wifi">Wi-Fi</option>
+                <option value="contact">Contact (vCard)</option>
+              </select>
+            </div>
+            <div id="qr-fields" class="stack"></div>
+            <div class="field-row" style="padding:10px 0 0"><label style="min-width:70px">Size</label><input class="mini" id="qr-size" type="number" value="256" min="64" max="1024" style="width:80px">
+              <label style="min-width:70px;margin-left:10px">Error corr.</label>
+              <select class="mini" id="qr-ecl"><option>L</option><option>M</option><option selected>Q</option><option>H</option></select>
+            </div>
+          </div>
+          <div class="card" style="display:flex;flex-direction:column;align-items:center;gap:10px">
+            <h4 style="align-self:flex-start">Preview</h4>
+            <canvas id="qr-canvas" style="background:#fff;border-radius:8px"></canvas>
+            <button class="btn primary" data-a="qr-download">Download PNG</button>
+          </div>
+        </div>`;
+      function fieldsFor(type){
+        if (type==='email') return `<input class="mini" id="qr-f1" placeholder="Email address"><input class="mini" id="qr-f2" placeholder="Subject (optional)">`;
+        if (type==='wifi') return `<input class="mini" id="qr-f1" placeholder="Network name (SSID)"><input class="mini" id="qr-f2" placeholder="Password"><select class="mini" id="qr-f3"><option>WPA</option><option>WEP</option><option value="nopass">None</option></select>`;
+        if (type==='contact') return `<input class="mini" id="qr-f1" placeholder="Full name"><input class="mini" id="qr-f2" placeholder="Phone"><input class="mini" id="qr-f3" placeholder="Email">`;
+        return `<textarea class="mini" id="qr-f1" style="min-height:70px" placeholder="Text or URL to encode"></textarea>`;
+      }
+      function buildPayload(type){
+        const v1 = container.querySelector('#qr-f1')?.value||'', v2 = container.querySelector('#qr-f2')?.value||'', v3 = container.querySelector('#qr-f3')?.value||'';
+        if (type==='email') return `mailto:${v1}${v2?'?subject='+encodeURIComponent(v2):''}`;
+        if (type==='wifi'){ const sec = v3==='nopass'?'nopass':v3; return sec==='nopass' ? `WIFI:T:nopass;S:${v1};;` : `WIFI:T:${sec};S:${v1};P:${v2};;`; }
+        if (type==='contact') return `BEGIN:VCARD\nVERSION:3.0\nFN:${v1}\nTEL:${v2}\nEMAIL:${v3}\nEND:VCARD`;
+        return v1;
+      }
+      async function regenerate(){
+        const ok = await ensureDeps();
+        if (!ok) return;
+        container.querySelector('#qr-err').classList.remove('show');
+        const type = container.querySelector('#qr-type').value;
+        const payload = buildPayload(type);
+        const canvas = container.querySelector('#qr-canvas');
+        const size = Math.max(64, Math.min(1024, +container.querySelector('#qr-size').value||256));
+        const ecl = container.querySelector('#qr-ecl').value;
+        if (!payload.trim()){ const ctx=canvas.getContext('2d'); canvas.width=size; canvas.height=size; ctx.clearRect(0,0,size,size); api.setStatus('Enter content to generate'); return; }
+        try{
+          await QRCode.toCanvas(canvas, payload, {width:size, errorCorrectionLevel:ecl, margin:2});
+          api.setStatus('QR code generated', true);
+        }catch(e){ api.setStatus('Could not generate: '+e.message, false); }
+      }
+      function rebuildFields(){
+        container.querySelector('#qr-fields').innerHTML = fieldsFor(container.querySelector('#qr-type').value);
+        container.querySelectorAll('#qr-fields input, #qr-fields textarea, #qr-fields select').forEach(i=>i.addEventListener('input', debounce(regenerate,250)));
+        regenerate();
+      }
+      container.querySelector('#qr-type').addEventListener('change', rebuildFields);
+      container.querySelector('#qr-size').addEventListener('input', debounce(regenerate,250));
+      container.querySelector('#qr-ecl').addEventListener('change', regenerate);
+      container.querySelector('[data-a="qr-download"]').addEventListener('click', ()=>{
+        const canvas = container.querySelector('#qr-canvas');
+        const a = document.createElement('a'); a.download='qrcode.png'; a.href = canvas.toDataURL('image/png'); a.click();
+      });
+      rebuildFields();
+    }
+
+    function stopScan(){
+      if (scanRAF) cancelAnimationFrame(scanRAF);
+      if (stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; }
+    }
+    function renderRead(){
+      const box = container.querySelector('#qr-body'); box.innerHTML = `
+        <div class="grid-2" style="grid-template-columns:1fr 1fr">
+          <div class="card">
+            <h4>Upload an image</h4>
+            <input type="file" id="qr-file" accept="image/*">
+            <canvas id="qr-upload-canvas" style="display:none;max-width:100%;margin-top:10px;border-radius:8px"></canvas>
+          </div>
+          <div class="card">
+            <h4>Scan with webcam</h4>
+            <div class="field-row" style="padding:0 0 8px"><button class="btn" data-a="qr-cam-start">Start camera</button><button class="btn ghost" data-a="qr-cam-stop">Stop</button></div>
+            <video id="qr-video" style="width:100%;border-radius:8px;background:#000;display:none" playsinline></video>
+            <canvas id="qr-scan-canvas" style="display:none"></canvas>
+          </div>
+        </div>
+        <div class="card" style="margin-top:12px">
+          <h4>Result</h4>
+          <div id="qr-result" style="font-family:var(--mono);font-size:13px;word-break:break-all;color:var(--text-dim)">No QR code decoded yet.</div>
+        </div>`;
+      function showResult(text){
+        const r = container.querySelector('#qr-result');
+        r.innerHTML = ''; r.appendChild(el('div',{style:'color:var(--text-primary)'}, text));
+        r.appendChild(el('button',{class:'btn ghost', style:'margin-top:8px', onclick:()=>copyText(text)},'Copy'));
+        api.setStatus('QR code decoded', true);
+      }
+      container.querySelector('#qr-file').addEventListener('change', async e=>{
+        const f = e.target.files[0]; if (!f) return;
+        if (!await ensureDeps()) return;
+        const img = new Image();
+        img.onload = ()=>{
+          const canvas = container.querySelector('#qr-upload-canvas');
+          canvas.width = img.width; canvas.height = img.height; canvas.style.display='block';
+          const ctx = canvas.getContext('2d'); ctx.drawImage(img,0,0);
+          const data = ctx.getImageData(0,0,canvas.width,canvas.height);
+          const result = jsQR(data.data, canvas.width, canvas.height);
+          if (result) showResult(result.data);
+          else { container.querySelector('#qr-result').textContent = 'No QR code found in that image.'; api.setStatus('No QR code found', false); }
+        };
+        img.src = URL.createObjectURL(f);
+      });
+      container.querySelector('[data-a="qr-cam-start"]').addEventListener('click', async ()=>{
+        if (!await ensureDeps()) return;
+        try{
+          stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}});
+        }catch(e){ toast('Camera access denied or unavailable','err'); return; }
+        const video = container.querySelector('#qr-video');
+        video.srcObject = stream; video.style.display='block'; await video.play();
+        const canvas = container.querySelector('#qr-scan-canvas');
+        function tick(){
+          if (!stream) return;
+          if (video.readyState === video.HAVE_ENOUGH_DATA){
+            canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+            const ctx = canvas.getContext('2d'); ctx.drawImage(video,0,0,canvas.width,canvas.height);
+            const data = ctx.getImageData(0,0,canvas.width,canvas.height);
+            const result = jsQR(data.data, canvas.width, canvas.height);
+            if (result){ showResult(result.data); stopScan(); video.style.display='none'; return; }
+          }
+          scanRAF = requestAnimationFrame(tick);
+        }
+        scanRAF = requestAnimationFrame(tick);
+      });
+      container.querySelector('[data-a="qr-cam-stop"]').addEventListener('click', ()=>{ stopScan(); container.querySelector('#qr-video').style.display='none'; });
+    }
+    function setMode(m){
+      mode = m;
+      container.querySelector('[data-a="mode-gen"]').className = 'btn'+(m==='gen'?' primary':'');
+      container.querySelector('[data-a="mode-read"]').className = 'btn'+(m==='read'?' primary':'');
+      stopScan();
+      if (m==='gen') renderGen(); else renderRead();
+    }
+    container.querySelector('[data-a="mode-gen"]').addEventListener('click', ()=>setMode('gen'));
+    container.querySelector('[data-a="mode-read"]').addEventListener('click', ()=>setMode('read'));
+    setMode('gen');
+    return { cleanup: stopScan };
+  }
+});
+
+/* =========================================================================
+   TOOL: JavaScript / CSS Beautifier & Minifier
+   Lazy-loads js-beautify (beautify, real parser-based, not regex) and
+   Terser (minify, a real minifier — not a naive regex strip, which would
+   risk silently corrupting code around strings/regex literals/ASI).
+   ========================================================================= */
+async function loadBeautifyDeps(){
+  await Promise.all([
+    loadScript('https://cdnjs.cloudflare.com/ajax/libs/js-beautify/1.15.4/beautify.min.js'),
+    loadScript('https://cdnjs.cloudflare.com/ajax/libs/js-beautify/1.15.4/beautify-css.min.js'),
+    loadScript('https://cdn.jsdelivr.net/npm/terser/dist/bundle.min.js'),
+  ]);
+}
+registerTool({
+  id:'jsbeautify-tool', name:'JS / CSS Beautifier & Minifier', category:'Developer Utilities', icon:'{;}',
+  mount(container, api){
+    container.innerHTML = `
+      <div class="tool-shell">
+        <div class="tool-toolbar">
+          <select class="mini" id="jb-lang"><option value="js">JavaScript</option><option value="css">CSS</option></select>
+          <button class="btn primary" data-a="beautify">Beautify</button>
+          <button class="btn" data-a="minify">Minify</button>
+          <label class="toggle-row"><input type="checkbox" id="jb-comments" checked> preserve comments</label>
+          <span class="grow"></span>
+          <button class="btn" data-a="copy">Copy output</button>
+        </div>
+        <div class="err-banner" id="jb-err"></div>
+        <div class="tool-body">
+          <div class="split"><div class="split-header">Input</div><div class="cm-wrap" id="jb-in-cm"></div></div>
+          <div class="split"><div class="split-header">Output <span class="grow"></span><span class="pill" id="jb-stats"></span></div><div class="cm-wrap" id="jb-out-cm"></div></div>
+        </div>
+      </div>`;
+    const cmIn = CodeMirror(container.querySelector('#jb-in-cm'), {
+      mode:'javascript', lineNumbers:true, theme: STATE.theme==='dark'?'material-darker':'default',
+      value:'function greet(name){\nif(!name){name="world"}\nconsole.log("Hello, "+name+"!")\n}\ngreet();',
+      indentUnit: STATE.indent, tabSize: STATE.indent, viewportMargin:60
+    });
+    const cmOut = CodeMirror(container.querySelector('#jb-out-cm'), {
+      mode:'javascript', lineNumbers:true, theme: STATE.theme==='dark'?'material-darker':'default',
+      readOnly:true, viewportMargin:60
+    });
+    function checkJsSyntax(code){
+      try{ new Function(code); return {ok:true}; }
+      catch(e){ return {ok:false, error: e.message}; }
+    }
+    function checkCssBraces(code){
+      let depth = 0;
+      for (const ch of code){ if (ch==='{') depth++; else if (ch==='}') depth--; if (depth<0) return {ok:false, error:'Unmatched "}" — a closing brace appears with no matching "{"'}; }
+      if (depth>0) return {ok:false, error:`${depth} unclosed "{" — missing ${depth} closing brace${depth===1?'':'s'}`};
+      return {ok:true};
+    }
+    let depsLoaded = false;
+    async function ensureDeps(){
+      if (depsLoaded) return true;
+      try{ await loadBeautifyDeps(); depsLoaded = true; return true; }
+      catch(e){
+        const bnr = container.querySelector('#jb-err');
+        bnr.textContent = 'Could not load the formatting library from the CDN — check your internet connection and reload. ('+e.message+')';
+        bnr.classList.add('show');
+        api.setStatus('Failed to load library', false);
+        return false;
+      }
+    }
+    function setLangMode(){
+      const lang = container.querySelector('#jb-lang').value;
+      const mode = lang==='css' ? 'css' : 'javascript';
+      cmIn.setOption('mode', mode); cmOut.setOption('mode', mode);
+    }
+    container.querySelector('#jb-lang').addEventListener('change', setLangMode);
+    async function beautify(){
+      if (!await ensureDeps()) return;
+      const lang = container.querySelector('#jb-lang').value;
+      const bnr = container.querySelector('#jb-err');
+      try{
+        const code = cmIn.getValue();
+        if (!code.trim()){ bnr.textContent='Nothing to beautify — paste some code first.'; bnr.classList.add('show'); return; }
+        const check = lang==='css' ? checkCssBraces(code) : checkJsSyntax(code);
+        if (!check.ok){ bnr.textContent = `Invalid ${lang.toUpperCase()}: ${check.error}`; bnr.classList.add('show'); api.setStatus('Invalid input', false); return; }
+        const out = lang==='css' ? css_beautify(code, {indent_size: STATE.indent}) : js_beautify(code, {indent_size: STATE.indent, preserve_newlines:true});
+        cmOut.setValue(out);
+        container.querySelector('#jb-stats').textContent = `${out.length} chars`; container.querySelector('#jb-stats').className='pill ok';
+        bnr.classList.remove('show'); api.setStatus('Beautified', true);
+      }catch(e){ bnr.textContent = 'Beautify error: '+e.message; bnr.classList.add('show'); api.setStatus('Beautify error', false); }
+    }
+    async function minify(){
+      const lang = container.querySelector('#jb-lang').value;
+      const bnr = container.querySelector('#jb-err');
+      const code = cmIn.getValue();
+      if (!code.trim()){ bnr.textContent='Nothing to minify — paste some code first.'; bnr.classList.add('show'); return; }
+      if (lang==='css'){
+        // CSS is much safer to regex-minify than JS (no ASI / regex-literal ambiguity) — needs no external library
+        const check = checkCssBraces(code);
+        if (!check.ok){ bnr.textContent = 'Invalid CSS: '+check.error; bnr.classList.add('show'); api.setStatus('Invalid input', false); return; }
+        try{
+          let out = code.replace(/\/\*[\s\S]*?\*\//g, container.querySelector('#jb-comments').checked ? m=>m : '')
+                         .replace(/\s*([{}:;,])\s*/g,'$1').replace(/;}/g,'}').replace(/\s+/g,' ').trim();
+          cmOut.setValue(out);
+          container.querySelector('#jb-stats').textContent = `${out.length} chars (was ${code.length})`; container.querySelector('#jb-stats').className='pill ok';
+          bnr.classList.remove('show'); api.setStatus('Minified', true);
+        }catch(e){ bnr.textContent='Minify error: '+e.message; bnr.classList.add('show'); api.setStatus('Minify error', false); }
+        return;
+      }
+      if (!await ensureDeps()) return;
+      try{
+        const result = await Terser.minify(code, {compress:true, mangle:true, format:{comments: container.querySelector('#jb-comments').checked}});
+        if (result.error) throw result.error;
+        cmOut.setValue(result.code||'');
+        container.querySelector('#jb-stats').textContent = `${(result.code||'').length} chars (was ${code.length})`; container.querySelector('#jb-stats').className='pill ok';
+        bnr.classList.remove('show'); api.setStatus('Minified', true);
+      }catch(e){ bnr.textContent = 'Minify error: '+(e.message||String(e)); bnr.classList.add('show'); api.setStatus('Syntax error — cannot minify', false); }
+    }
+    container.querySelector('[data-a="beautify"]').addEventListener('click', beautify);
+    container.querySelector('[data-a="minify"]').addEventListener('click', minify);
+    container.querySelector('[data-a="copy"]').addEventListener('click', ()=>copyText(cmOut.getValue()));
+    container._importText = (text,name)=>{ cmIn.setValue(text); if (name && name.endsWith('.css')) { container.querySelector('#jb-lang').value='css'; setLangMode(); } };
+    setTimeout(()=>{ cmIn.refresh(); cmOut.refresh(); }, 30);
+    return {
+      getState: ()=>({input: cmIn.getValue(), lang: container.querySelector('#jb-lang').value}),
+      setState: (s)=>{ cmIn.setValue(s.input||''); if (s.lang){ container.querySelector('#jb-lang').value = s.lang; setLangMode(); } }
+    };
+  }
+});
+
+/* =========================================================================
+   TOOL: Basic Image Editor (resize, crop, rotate, flip, compress, export)
+   Pure canvas — no external libraries, no upload, everything local.
+   ========================================================================= */
+registerTool({
+  id:'image-editor-tool', name:'Image Editor', category:'Developer Utilities', icon:'\u{1F5BC}',
+  mount(container, api){
+    container.innerHTML = `
+      <div class="tool-shell">
+        <div class="tool-toolbar" id="ie-toolbar">
+          <label class="btn ghost" style="cursor:pointer">Open image… <input type="file" id="ie-file" accept="image/*" style="display:none"></label>
+          <span class="tb-sep"></span>
+          <button class="tb-icon" data-a="rotate-l" title="Rotate left">\u21B6</button>
+          <button class="tb-icon" data-a="rotate-r" title="Rotate right">\u21B7</button>
+          <button class="tb-icon" data-a="flip-h" title="Flip horizontal">\u2194</button>
+          <button class="tb-icon" data-a="flip-v" title="Flip vertical">\u2195</button>
+          <span class="tb-sep"></span>
+          <button class="tb-icon" data-a="crop-mode" title="Draw a crop selection on the image">\u2702</button>
+          <button class="btn primary" data-a="crop-apply" style="display:none">Apply Crop</button>
+          <button class="btn ghost" data-a="crop-cancel" style="display:none">Cancel</button>
+          <span class="tb-sep"></span>
+          <button class="btn ghost" data-a="reset">Reset</button>
+          <span class="grow"></span>
+          <button class="btn primary" data-a="download">Export</button>
+        </div>
+        <div class="tool-body" style="flex-direction:column;overflow:auto">
+          <div class="empty-note-state" id="ie-empty"><div style="font-size:26px">\u{1F5BC}</div><div>Open an image to start editing</div></div>
+          <div id="ie-workarea" style="display:none;padding:14px;gap:14px;flex-direction:row;flex-wrap:wrap">
+            <div style="position:relative;flex:1;min-width:280px;display:flex;align-items:center;justify-content:center;background:repeating-conic-gradient(#33353f 0% 25%, #2a2c35 0% 50%) 50%/16px 16px;border-radius:10px;border:1px solid var(--border);overflow:auto;max-height:60vh">
+              <div id="ie-canvas-wrap" style="position:relative;display:inline-block;line-height:0">
+                <canvas id="ie-canvas" style="max-width:100%;display:block"></canvas>
+              </div>
+            </div>
+            <div class="card" style="width:230px">
+              <h4>Resize</h4>
+              <div class="field-row" style="padding:0 0 8px"><label style="min-width:44px">W</label><input class="mini" id="ie-w" type="number" style="width:80px"><label style="min-width:20px">H</label><input class="mini" id="ie-h" type="number" style="width:80px"></div>
+              <label class="toggle-row" style="margin-bottom:8px"><input type="checkbox" id="ie-lock" checked> lock aspect ratio</label>
+              <button class="btn" data-a="apply-resize" style="width:100%">Apply resize</button>
+              <h4 style="margin-top:16px">Compress (JPEG)</h4>
+              <input type="range" id="ie-quality" min="10" max="100" value="85" style="width:100%">
+              <div style="font-size:11px;color:var(--text-dim)" id="ie-quality-label">Quality: 85%</div>
+              <div style="font-size:11px;color:var(--text-dim);margin-top:6px" id="ie-size-estimate"></div>
+              <h4 style="margin-top:16px">Info</h4>
+              <table class="kv" id="ie-info"></table>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    const canvas = container.querySelector('#ie-canvas');
+    const ctx = canvas.getContext('2d');
+    let originalImg = null, cropping = false;
+
+    function showWorkarea(){ container.querySelector('#ie-empty').style.display='none'; container.querySelector('#ie-workarea').style.display='flex'; }
+    function updateInfo(){
+      container.querySelector('#ie-info').innerHTML = '';
+      const rows = [['Dimensions', `${canvas.width} × ${canvas.height}`]];
+      rows.forEach(([k,v])=>container.querySelector('#ie-info').appendChild(el('tr',{}, el('td',{},k), el('td',{},v))));
+      container.querySelector('#ie-w').value = canvas.width;
+      container.querySelector('#ie-h').value = canvas.height;
+      aspectRatio = canvas.width / canvas.height;
+      estimateSize();
+    }
+    function estimateSize(){
+      const q = (+container.querySelector('#ie-quality').value)/100;
+      canvas.toBlob(blob=>{ if (blob) container.querySelector('#ie-size-estimate').textContent = `Estimated export size: ${fmtBytes(blob.size)}`; }, 'image/jpeg', q);
+    }
+    function loadImage(file){
+      const img = new Image();
+      img.onload = ()=>{
+        originalImg = img;
+        canvas.width = img.width; canvas.height = img.height;
+        ctx.drawImage(img,0,0);
+        showWorkarea(); updateInfo();
+        api.setStatus(`Loaded ${file.name} (${img.width}×${img.height})`, true);
+      };
+      img.onerror = ()=> toast('Could not load that image','err');
+      img.src = URL.createObjectURL(file);
+    }
+    container.querySelector('#ie-file').addEventListener('change', e=>{ const f=e.target.files[0]; if (f) loadImage(f); });
+    // drag & drop
+    canvas.addEventListener('dragover', e=>e.preventDefault());
+    container.querySelector('#ie-workarea').addEventListener('dragover', e=>e.preventDefault());
+    container.querySelector('#ie-workarea').addEventListener('drop', e=>{ e.preventDefault(); const f=e.dataTransfer.files[0]; if (f && f.type.startsWith('image/')) loadImage(f); });
+    container.querySelector('#ie-empty').addEventListener('dragover', e=>e.preventDefault());
+    container.querySelector('#ie-empty').addEventListener('drop', e=>{ e.preventDefault(); const f=e.dataTransfer.files[0]; if (f && f.type.startsWith('image/')) loadImage(f); });
+
+    function rotate(dir){
+      const w=canvas.width, h=canvas.height;
+      const tmp = document.createElement('canvas'); tmp.width=w; tmp.height=h;
+      tmp.getContext('2d').drawImage(canvas,0,0);
+      canvas.width=h; canvas.height=w;
+      ctx.save();
+      if (dir==='r'){ ctx.translate(h,0); ctx.rotate(Math.PI/2); } else { ctx.translate(0,w); ctx.rotate(-Math.PI/2); }
+      ctx.drawImage(tmp,0,0);
+      ctx.restore();
+      updateInfo();
+    }
+    function flip(axis){
+      const w=canvas.width, h=canvas.height;
+      const tmp = document.createElement('canvas'); tmp.width=w; tmp.height=h;
+      tmp.getContext('2d').drawImage(canvas,0,0);
+      ctx.save(); ctx.clearRect(0,0,w,h);
+      if (axis==='h'){ ctx.translate(w,0); ctx.scale(-1,1); } else { ctx.translate(0,h); ctx.scale(1,-1); }
+      ctx.drawImage(tmp,0,0);
+      ctx.restore();
+      estimateSize();
+    }
+    container.querySelector('[data-a="rotate-l"]').addEventListener('click', ()=>{ if (originalImg) rotate('l'); });
+    container.querySelector('[data-a="rotate-r"]').addEventListener('click', ()=>{ if (originalImg) rotate('r'); });
+    container.querySelector('[data-a="flip-h"]').addEventListener('click', ()=>{ if (originalImg) flip('h'); });
+    container.querySelector('[data-a="flip-v"]').addEventListener('click', ()=>{ if (originalImg) flip('v'); });
+    container.querySelector('[data-a="reset"]').addEventListener('click', ()=>{
+      if (!originalImg) return;
+      canvas.width = originalImg.width; canvas.height = originalImg.height;
+      ctx.drawImage(originalImg,0,0); updateInfo();
+    });
+
+    // resize
+    let aspectRatio = 1;
+    function refreshAspect(){ aspectRatio = canvas.width / canvas.height; }
+    container.querySelector('#ie-w').addEventListener('input', ()=>{
+      if (!container.querySelector('#ie-lock').checked) return;
+      container.querySelector('#ie-h').value = Math.round((+container.querySelector('#ie-w').value||1) / aspectRatio);
+    });
+    container.querySelector('#ie-h').addEventListener('input', ()=>{
+      if (!container.querySelector('#ie-lock').checked) return;
+      container.querySelector('#ie-w').value = Math.round((+container.querySelector('#ie-h').value||1) * aspectRatio);
+    });
+    container.querySelector('[data-a="apply-resize"]').addEventListener('click', ()=>{
+      const nw = Math.max(1, +container.querySelector('#ie-w').value||canvas.width);
+      const nh = Math.max(1, +container.querySelector('#ie-h').value||canvas.height);
+      const tmp = document.createElement('canvas'); tmp.width=canvas.width; tmp.height=canvas.height;
+      tmp.getContext('2d').drawImage(canvas,0,0);
+      canvas.width = nw; canvas.height = nh;
+      ctx.drawImage(tmp,0,0,tmp.width,tmp.height,0,0,nw,nh);
+      refreshAspect(); updateInfo();
+      toast('Resized to '+nw+'×'+nh,'ok');
+    });
+
+    // ---- crop: dimmed-surround selection box with draggable resize handles ----
+    const canvasWrap = container.querySelector('#ie-canvas-wrap');
+    const HANDLE_POS = {nw:[0,0], n:[50,0], ne:[100,0], e:[100,50], se:[100,100], s:[50,100], sw:[0,100], w:[0,50]};
+    const HANDLE_CURSOR = {nw:'nwse-resize', n:'ns-resize', ne:'nesw-resize', e:'ew-resize', se:'nwse-resize', s:'ns-resize', sw:'nesw-resize', w:'ew-resize'};
+    let cropBox = null, cropBoxEl = null, cropDrag = null;
+
+    function wrapRect(){ return canvasWrap.getBoundingClientRect(); }
+    function buildCropBoxEl(){
+      if (cropBoxEl) return cropBoxEl;
+      cropBoxEl = el('div', {class:'ie-crop-box'});
+      Object.keys(HANDLE_POS).forEach(pos=>{
+        const [lx,ty] = HANDLE_POS[pos];
+        const h = el('div', {class:'ie-crop-handle', 'data-handle':pos, style:`left:${lx}%;top:${ty}%;cursor:${HANDLE_CURSOR[pos]}`});
+        cropBoxEl.appendChild(h);
+      });
+      canvasWrap.appendChild(cropBoxEl);
+      return cropBoxEl;
+    }
+    function renderCropBox(){
+      if (!cropBox){ if (cropBoxEl) cropBoxEl.style.display='none'; return; }
+      const elBox = buildCropBoxEl();
+      elBox.style.display = 'block';
+      elBox.style.left = cropBox.x+'px'; elBox.style.top = cropBox.y+'px';
+      elBox.style.width = cropBox.w+'px'; elBox.style.height = cropBox.h+'px';
+    }
+    function clearCropBox(){
+      cropBox = null;
+      if (cropBoxEl){ cropBoxEl.remove(); cropBoxEl = null; }
+    }
+    function setCropActionsVisible(show){
+      container.querySelector('[data-a="crop-apply"]').style.display = show ? 'inline-flex' : 'none';
+      container.querySelector('[data-a="crop-cancel"]').style.display = show ? 'inline-flex' : 'none';
+    }
+    function enterCropMode(){
+      cropping = true;
+      container.querySelector('[data-a="crop-mode"]').style.color = 'var(--accent)';
+      canvas.style.cursor = 'crosshair';
+    }
+    function exitCropMode(){
+      cropping = false;
+      container.querySelector('[data-a="crop-mode"]').style.color = '';
+      canvas.style.cursor = '';
+      setCropActionsVisible(false);
+      clearCropBox();
+    }
+    container.querySelector('[data-a="crop-mode"]').addEventListener('click', ()=>{
+      if (!originalImg) return;
+      cropping ? exitCropMode() : enterCropMode();
+    });
+    container.querySelector('[data-a="crop-cancel"]').addEventListener('click', exitCropMode);
+    container.querySelector('[data-a="crop-apply"]').addEventListener('click', ()=>{
+      if (!cropBox || cropBox.w<4 || cropBox.h<4){ toast('Draw a crop selection first','err'); return; }
+      const r = wrapRect();
+      const scaleX = canvas.width / r.width, scaleY = canvas.height / r.height;
+      const x = Math.round(cropBox.x*scaleX), y = Math.round(cropBox.y*scaleY);
+      const w = Math.round(cropBox.w*scaleX), h = Math.round(cropBox.h*scaleY);
+      const tmp = document.createElement('canvas'); tmp.width=canvas.width; tmp.height=canvas.height;
+      tmp.getContext('2d').drawImage(canvas,0,0);
+      canvas.width=w; canvas.height=h;
+      ctx.drawImage(tmp, x,y,w,h, 0,0,w,h);
+      refreshAspect(); updateInfo();
+      exitCropMode();
+      toast('Cropped to '+w+'×'+h,'ok');
+    });
+
+    function clamp(v,lo,hi){ return Math.max(lo, Math.min(hi, v)); }
+    canvasWrap.addEventListener('mousedown', e=>{
+      if (!cropping) return;
+      const r = wrapRect();
+      const mx = clamp(e.clientX-r.left, 0, r.width), my = clamp(e.clientY-r.top, 0, r.height);
+      const handle = e.target.getAttribute && e.target.getAttribute('data-handle');
+      if (handle){ cropDrag = {mode:'resize', handle, startBox:{...cropBox}, startX:mx, startY:my}; e.preventDefault(); return; }
+      if (cropBoxEl && e.target===cropBoxEl){ cropDrag = {mode:'move', startBox:{...cropBox}, startX:mx, startY:my}; e.preventDefault(); return; }
+      // start a fresh selection
+      cropBox = {x:mx, y:my, w:0, h:0};
+      cropDrag = {mode:'create', originX:mx, originY:my};
+      setCropActionsVisible(true);
+      renderCropBox();
+      e.preventDefault();
+    });
+    function onCropMouseMove(e){
+      if (!cropDrag) return;
+      const r = wrapRect();
+      const mx = clamp(e.clientX-r.left, 0, r.width), my = clamp(e.clientY-r.top, 0, r.height);
+      if (cropDrag.mode==='create'){
+        cropBox = {x:Math.min(cropDrag.originX,mx), y:Math.min(cropDrag.originY,my), w:Math.abs(mx-cropDrag.originX), h:Math.abs(my-cropDrag.originY)};
+      } else if (cropDrag.mode==='move'){
+        const dx = mx-cropDrag.startX, dy = my-cropDrag.startY;
+        const b = cropDrag.startBox;
+        cropBox = {x: clamp(b.x+dx, 0, r.width-b.w), y: clamp(b.y+dy, 0, r.height-b.h), w:b.w, h:b.h};
+      } else if (cropDrag.mode==='resize'){
+        const dx = mx-cropDrag.startX, dy = my-cropDrag.startY;
+        const b = cropDrag.startBox; let {x,y,w,h} = b;
+        const hd = cropDrag.handle;
+        if (hd.includes('e')) w = clamp(b.w+dx, 4, r.width-b.x);
+        if (hd.includes('s')) h = clamp(b.h+dy, 4, r.height-b.y);
+        if (hd.includes('w')){ const nx = clamp(b.x+dx, 0, b.x+b.w-4); w = b.w+(b.x-nx); x = nx; }
+        if (hd.includes('n')){ const ny = clamp(b.y+dy, 0, b.y+b.h-4); h = b.h+(b.y-ny); y = ny; }
+        cropBox = {x,y,w,h};
+      }
+      renderCropBox();
+    }
+    function onCropMouseUp(){ cropDrag = null; }
+    document.addEventListener('mousemove', onCropMouseMove);
+    document.addEventListener('mouseup', onCropMouseUp);
+
+    container.querySelector('#ie-quality').addEventListener('input', ()=>{
+      container.querySelector('#ie-quality-label').textContent = 'Quality: '+container.querySelector('#ie-quality').value+'%';
+      debounce(estimateSize,150)();
+    });
+    container.querySelector('[data-a="download"]').addEventListener('click', ()=>{
+      if (!originalImg) { toast('Open an image first','err'); return; }
+      const q = (+container.querySelector('#ie-quality').value)/100;
+      canvas.toBlob(blob=>{
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a'); a.href=url; a.download='edited.jpg'; a.click();
+        setTimeout(()=>URL.revokeObjectURL(url),1000);
+      }, 'image/jpeg', q);
+    });
+    return {
+      cleanup: ()=>{ document.removeEventListener('mousemove', onCropMouseMove); document.removeEventListener('mouseup', onCropMouseUp); }
     };
   }
 });
