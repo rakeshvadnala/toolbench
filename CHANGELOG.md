@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented here.
 
+## v1.4.1 (2026-07-22)
+
+### Added — JSON Path Finder
+
+- Live bracket matching: as the cursor moves through the JSON, the innermost enclosing `{}`/`[]` pair is highlighted (bold accent outline on both brackets) with a subtle background tint over the whole block, similar to VS Code / IntelliJ
+- JSON-aware: brackets that appear inside string values (e.g. `"note": "see { this }"`) are correctly ignored when computing matches — verified with escaped-quote and nested-structure test cases before wiring into the editor
+
+## v1.4.0 (2026-07-22)
+
+### Added — Timestamp Converter
+
+- Date & time picker (`datetime-local`) — pick a date visually and every format updates instantly, no page refresh
+- **LDAP Generalized Time** support (RFC 4517), e.g. `20260722103045Z`, including fractional seconds and `+HHMM`/`-HHMM` offsets
+- **LDAP/AD Windows FileTime** support (100-nanosecond intervals since 1601-01-01 UTC), using `BigInt` arithmetic since real FileTime values exceed `Number.MAX_SAFE_INTEGER`. Verified against the well-known epoch constant (`116444736000000000` = 1970-01-01) and round-tripped through the actual UI, not just unit-tested in isolation.
+- Per-field inline validation — each of the 5 formats (Unix seconds, Unix ms, LDAP Generalized Time, LDAP/AD FileTime, ISO 8601) shows its own clear error message on invalid input without clobbering the other fields' last-valid values
+- Copy button on every field
+- All 5 formats plus the date picker are simultaneously live inputs and outputs — edit any one and the rest update immediately
+
 ## v1.3.1 (2026-07-22)
 
 ### Fixed
