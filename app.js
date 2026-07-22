@@ -582,6 +582,46 @@ registerTool({
     });
     let lastParsed = null;
 
+    /* ---- bracket matching (JSON-aware: ignores brackets inside string values) ---- */
+    let bracketPairs = [], bracketMarks = [];
+    function computeBracketPairs(text){
+      const pairs = [];
+      const stack = [];
+      let inString = false, escape = false;
+      for (let i=0;i<text.length;i++){
+        const c = text[i];
+        if (inString){
+          if (escape) escape = false;
+          else if (c==='\\') escape = true;
+          else if (c==='"') inString = false;
+          continue;
+        }
+        if (c==='"'){ inString = true; continue; }
+        if (c==='{' || c==='[') stack.push(i);
+        else if (c==='}' || c===']'){ if (stack.length) pairs.push({open: stack.pop(), close: i}); }
+      }
+      return pairs;
+    }
+    function findEnclosingPair(idx){
+      let best = null;
+      for (const p of bracketPairs){
+        if (p.open <= idx && idx <= p.close+1){
+          if (!best || (p.close-p.open) < (best.close-best.open)) best = p;
+        }
+      }
+      return best;
+    }
+    function updateBracketHighlight(){
+      bracketMarks.forEach(m=>m.clear()); bracketMarks = [];
+      const pair = findEnclosingPair(cm.indexFromPos(cm.getCursor()));
+      if (!pair) return;
+      const openFrom = cm.posFromIndex(pair.open), openTo = cm.posFromIndex(pair.open+1);
+      const closeFrom = cm.posFromIndex(pair.close), closeTo = cm.posFromIndex(pair.close+1);
+      bracketMarks.push(cm.markText(openFrom, closeTo, {className:'cm-bracket-block'}));
+      bracketMarks.push(cm.markText(openFrom, openTo, {className:'cm-bracket-match'}));
+      bracketMarks.push(cm.markText(closeFrom, closeTo, {className:'cm-bracket-match'}));
+    }
+
     function setPill(ok, msg){
       const p = container.querySelector('#json-pill');
       p.textContent = ok ? 'Valid JSON' : 'Invalid';
@@ -664,7 +704,8 @@ registerTool({
       });
       renderTree(matches);
     }
-    cm.on('change', debounce(()=>{ tryParse(); runPath(); }, 220));
+    cm.on('change', debounce(()=>{ tryParse(); runPath(); bracketPairs = computeBracketPairs(cm.getValue()); updateBracketHighlight(); }, 220));
+    cm.on('cursorActivity', updateBracketHighlight);
     container.querySelector('#json-path').addEventListener('input', debounce(runPath, 150));
 
     container.querySelector('[data-a="format"]').addEventListener('click', ()=>{
@@ -682,6 +723,8 @@ registerTool({
 
     container._importText = (text, name)=>{ cm.setValue(text); api.setTitle(name); tryParse(); };
     tryParse();
+    bracketPairs = computeBracketPairs(cm.getValue());
+    updateBracketHighlight();
     setTimeout(()=>cm.refresh(), 30);
     return {
       getState: ()=>({value: cm.getValue(), path: container.querySelector('#json-path').value}),
@@ -1456,19 +1499,109 @@ registerTool({
           <span id="ts-live" class="pill ok" style="font-family:var(--mono)"></span>
           <button class="btn ghost" data-a="usenow">Use current time</button>
         </div>
-        <div class="grid-2" style="grid-template-columns:1fr;max-width:640px">
+        <div class="grid-2" style="grid-template-columns:1fr;max-width:680px">
+          <div class="card">
+            <h4>Pick a date &amp; time</h4>
+            <div class="field-row" style="padding:6px 0">
+              <input type="datetime-local" class="mini grow" id="ts-picker" step="1">
+            </div>
+          </div>
           <div class="card">
             <h4>Convert</h4>
-            <div class="field-row" style="padding:6px 0"><label>Unix (sec)</label><input class="mini grow" id="ts-sec"></div>
-            <div class="field-row" style="padding:6px 0"><label>Unix (ms)</label><input class="mini grow" id="ts-ms"></div>
-            <div class="field-row" style="padding:6px 0"><label>ISO 8601</label><input class="mini grow" id="ts-iso"></div>
-            <div class="field-row" style="padding:6px 0"><label>Local time</label><input class="mini grow" id="ts-local" readonly></div>
-            <div class="field-row" style="padding:6px 0"><label>UTC</label><input class="mini grow" id="ts-utc" readonly></div>
-            <div class="field-row" style="padding:6px 0"><label>Relative</label><input class="mini grow" id="ts-rel" readonly></div>
+            <div id="ts-fields"></div>
+          </div>
+          <div class="card">
+            <h4>Also shown as</h4>
+            <div class="field-row" style="padding:6px 0"><label style="min-width:100px">Local time</label><input class="mini grow" id="ts-local" readonly></div>
+            <div class="field-row" style="padding:6px 0"><label style="min-width:100px">UTC</label><input class="mini grow" id="ts-utc" readonly></div>
+            <div class="field-row" style="padding:6px 0"><label style="min-width:100px">Relative</label><input class="mini grow" id="ts-rel" readonly></div>
           </div>
         </div>
       </div>`;
-    let syncing = false;
+
+    /* ---- LDAP Generalized Time (RFC 4517) ---- */
+    function parseLdapGeneralizedTime(str){
+      const m = str.trim().match(/^(\d{4})(\d{2})(\d{2})(\d{2})(?:(\d{2}))?(?:(\d{2}))?([.,](\d+))?(Z|[+-]\d{2}:?\d{2})?$/);
+      if (!m) throw new Error('Expected YYYYMMDDHHMMSSZ, e.g. 20260722103045Z');
+      const Y=+m[1], Mo=+m[2], D=+m[3], H=+m[4], Mi=m[5]?+m[5]:0, S=m[6]?+m[6]:0;
+      if (Mo<1||Mo>12) throw new Error('Month must be 01–12');
+      if (D<1||D>31) throw new Error('Day must be 01–31');
+      if (H>23||Mi>59||S>60) throw new Error('Invalid time of day');
+      let ms = 0;
+      if (m[8]) ms = Math.round(parseFloat('0.'+m[8])*1000);
+      const tz = m[9];
+      let date;
+      if (!tz || tz==='Z'){
+        date = new Date(Date.UTC(Y, Mo-1, D, H, Mi, S, ms));
+      } else {
+        const sign = tz[0]==='-' ? -1 : 1;
+        const clean = tz.slice(1).replace(':','');
+        const oh = +clean.slice(0,2), om = +(clean.slice(2,4)||0);
+        date = new Date(Date.UTC(Y, Mo-1, D, H, Mi, S, ms) - sign*(oh*60+om)*60000);
+      }
+      if (isNaN(date.getTime())) throw new Error('Invalid date/time values');
+      return date;
+    }
+    function toLdapGeneralizedTime(d){
+      const pad=(n)=>String(n).padStart(2,'0');
+      return `${d.getUTCFullYear()}${pad(d.getUTCMonth()+1)}${pad(d.getUTCDate())}${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`;
+    }
+
+    /* ---- AD / Windows FileTime: 100ns intervals since 1601-01-01 UTC ---- */
+    const FILETIME_EPOCH_DIFF_MS = 11644473600000n;
+    function parseFileTime(str){
+      const s = str.trim();
+      if (!/^\d+$/.test(s)) throw new Error('Expected a positive integer (100-nanosecond intervals since 1601-01-01)');
+      const ft = BigInt(s);
+      const msBig = ft/10000n - FILETIME_EPOCH_DIFF_MS;
+      const msNum = Number(msBig);
+      if (!Number.isFinite(msNum) || msNum < -8640000000000000 || msNum > 8640000000000000) throw new Error('Value is out of the representable date range');
+      const date = new Date(msNum);
+      if (isNaN(date.getTime())) throw new Error('Value is out of the representable date range');
+      return date;
+    }
+    function toFileTime(d){
+      const ms = BigInt(d.getTime()) + FILETIME_EPOCH_DIFF_MS;
+      if (ms < 0n) throw new Error('Date is before the FileTime epoch (1601-01-01)');
+      return (ms*10000n).toString();
+    }
+
+    const FORMATS = [
+      {id:'sec', label:'Unix Timestamp (Seconds)', placeholder:'1753172345',
+        toDate: v=>{ if(!/^-?\d+$/.test(v.trim())) throw new Error('Expected an integer number of seconds'); return new Date(+v*1000); },
+        fromDate: d=>String(Math.floor(d.getTime()/1000))},
+      {id:'ms', label:'Unix Timestamp (Milliseconds)', placeholder:'1753172345000',
+        toDate: v=>{ if(!/^-?\d+$/.test(v.trim())) throw new Error('Expected an integer number of milliseconds'); return new Date(+v); },
+        fromDate: d=>String(d.getTime())},
+      {id:'ldap', label:'LDAP Generalized Time', placeholder:'20260722103045Z',
+        toDate: parseLdapGeneralizedTime, fromDate: toLdapGeneralizedTime},
+      {id:'filetime', label:'LDAP/AD Windows FileTime', placeholder:'134291898450000000',
+        toDate: parseFileTime, fromDate: toFileTime, hint:'100-ns intervals since 1601-01-01 UTC · AD often uses 0 for "never" and 9223372036854775807 for "never expires"'},
+      {id:'iso', label:'ISO 8601 Date Time', placeholder:'2026-07-22T10:30:45.000Z',
+        toDate: v=>{ const d=new Date(v); if (isNaN(d.getTime())) throw new Error('Not a recognizable ISO 8601 date/time'); return d; },
+        fromDate: d=>d.toISOString()},
+    ];
+
+    const fieldsBox = container.querySelector('#ts-fields');
+    FORMATS.forEach(f=>{
+      const row = el('div', {class:'field-row', style:'padding:6px 0;align-items:flex-start;flex-wrap:wrap'},
+        el('label',{style:'min-width:170px;padding-top:6px'}, f.label),
+        el('div',{style:'flex:1;min-width:180px'},
+          el('div',{style:'display:flex;gap:6px'},
+            el('input',{class:'mini grow', id:'ts-'+f.id, placeholder:f.placeholder, style:'font-family:var(--mono)'}),
+            el('span',{class:'icon-btn', onclick:()=>copyText(container.querySelector('#ts-'+f.id).value)}, '⧉')
+          ),
+          el('div',{id:'ts-'+f.id+'-err', style:'color:var(--danger);font-size:10.5px;margin-top:3px;display:none'}),
+          f.hint ? el('div',{style:'color:var(--text-dim);font-size:10.5px;margin-top:3px'}, f.hint) : null
+        )
+      );
+      fieldsBox.appendChild(row);
+    });
+
+    function toDatetimeLocalValue(d){
+      const pad=(n)=>String(n).padStart(2,'0');
+      return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    }
     function relative(d){
       const diff = (Date.now()-d.getTime())/1000;
       const abs = Math.abs(diff);
@@ -1478,21 +1611,47 @@ registerTool({
       const rounded = Math.round(val);
       return diff>=0 ? `${rounded} ${name}${rounded===1?'':'s'} ago` : `in ${rounded} ${name}${rounded===1?'':'s'}`;
     }
-    function fillFrom(date){
-      if (syncing || isNaN(date.getTime())) return;
-      syncing = true;
-      container.querySelector('#ts-sec').value = Math.floor(date.getTime()/1000);
-      container.querySelector('#ts-ms').value = date.getTime();
-      container.querySelector('#ts-iso').value = date.toISOString();
+    function clearFieldError(id){
+      const e = container.querySelector('#ts-'+id+'-err'); e.style.display='none'; e.textContent='';
+      container.querySelector('#ts-'+id).style.borderColor='';
+    }
+    function showFieldError(id, msg){
+      const e = container.querySelector('#ts-'+id+'-err'); e.style.display='block'; e.textContent=msg;
+      container.querySelector('#ts-'+id).style.borderColor='var(--danger)';
+    }
+
+    let lastValidDate = new Date();
+    function fillFrom(date, skipId){
+      if (isNaN(date.getTime())) return;
+      lastValidDate = date;
+      FORMATS.forEach(f=>{
+        if (f.id===skipId) return;
+        try{ container.querySelector('#ts-'+f.id).value = f.fromDate(date); clearFieldError(f.id); }
+        catch(e){ /* e.g. a date before 1601 can't be shown as FileTime — leave that field's last value */ }
+      });
+      if (skipId!=='picker') container.querySelector('#ts-picker').value = toDatetimeLocalValue(date);
       container.querySelector('#ts-local').value = date.toString();
       container.querySelector('#ts-utc').value = date.toUTCString();
       container.querySelector('#ts-rel').value = relative(date);
-      syncing = false;
+      api.setStatus('Converted', true);
     }
-    container.querySelector('#ts-sec').addEventListener('input', e=>{ if(e.target.value) fillFrom(new Date(+e.target.value*1000)); });
-    container.querySelector('#ts-ms').addEventListener('input', e=>{ if(e.target.value) fillFrom(new Date(+e.target.value)); });
-    container.querySelector('#ts-iso').addEventListener('input', e=>{ if(e.target.value) fillFrom(new Date(e.target.value)); });
+
+    FORMATS.forEach(f=>{
+      container.querySelector('#ts-'+f.id).addEventListener('input', e=>{
+        const v = e.target.value;
+        if (!v.trim()){ clearFieldError(f.id); return; }
+        try{ const d = f.toDate(v); clearFieldError(f.id); fillFrom(d, f.id); }
+        catch(err){ showFieldError(f.id, err.message); api.setStatus('Invalid '+f.label, false); }
+      });
+    });
+    container.querySelector('#ts-picker').addEventListener('input', e=>{
+      if (!e.target.value) return;
+      const d = new Date(e.target.value);
+      if (isNaN(d.getTime())){ api.setStatus('Invalid date/time', false); return; }
+      fillFrom(d, 'picker');
+    });
     container.querySelector('[data-a="usenow"]').addEventListener('click', ()=>fillFrom(new Date()));
+
     const liveTimer = setInterval(()=>{ container.querySelector('#ts-live').textContent = Math.floor(Date.now()/1000)+'  ·  '+new Date().toLocaleTimeString(); }, 1000);
     container.querySelector('#ts-live').textContent = Math.floor(Date.now()/1000)+'  ·  '+new Date().toLocaleTimeString();
     fillFrom(new Date());
@@ -1500,7 +1659,7 @@ registerTool({
     return {
       cleanup: ()=>clearInterval(liveTimer),
       getState: ()=>({iso: container.querySelector('#ts-iso').value}),
-      setState: (s)=>{ if (s.iso) fillFrom(new Date(s.iso)); }
+      setState: (s)=>{ if (s.iso){ try{ fillFrom(new Date(s.iso)); }catch(e){} } }
     };
   }
 });

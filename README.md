@@ -15,7 +15,7 @@ A modern, offline-first developer utility toolkit that runs entirely in the brow
 - Drag a file onto **Import** to route it straight into the matching tool
 
 **Core Tools**
-- **JSON Path Finder** — beautify/minify, live validation, collapsible tree view, JSONPath evaluator with match highlighting
+- **JSON Path Finder** — beautify/minify, live validation, collapsible tree view, JSONPath evaluator with match highlighting, and live bracket matching (the enclosing `{}`/`[]` pair highlights as you move the cursor, VS Code/IntelliJ-style)
 - **XML Path Finder** — beautify/minify, live validation, XPath evaluation (via the browser's native `XPathEvaluator`)
 - **SQL Formatter** — beautify/minify, keyword case conversion, dialect selector
 - **Text / JSON Diff** — line-level diff, JSON-aware comparison (key sorting), ignore-whitespace mode
@@ -50,6 +50,10 @@ A modern, offline-first developer utility toolkit that runs entirely in the brow
 - HTTP Status Code Reference (searchable, categorized 1xx–5xx)
 - Color Picker & Converter (HEX/RGB/RGBA/HSL, complementary/analogous/monochrome palettes, WCAG contrast checker)
 - Markdown Table Generator (visual spreadsheet-style grid with per-column alignment)
+- **X.509 Certificate Decoder** — subject/issuer/validity/serial/signature algorithm/SAN/fingerprints, hand-written DER parser (no ASN.1 library), verified against real openssl-generated certificates including an expired cert and a leaf+root chain
+- **QR Code Generator & Reader** — text/URL/email/Wi-Fi/vCard generation, decode from an uploaded image or a live webcam scan, download as PNG
+- **JS / CSS Beautifier & Minifier** — beautify via `js-beautify`, minify JS via `Terser` (a real minifier, not regex stripping) and CSS via a lightweight safe regex pass
+- **Image Editor** — resize (aspect-locked), crop, rotate, flip, JPEG compression with live size estimate, all on `<canvas>`, nothing uploaded anywhere
 
 Everything runs client-side. Nothing you paste into Toolbench leaves your browser.
 
@@ -77,7 +81,7 @@ toolbench/
                  # + one registerTool({...}) block per tool
 ```
 
-- Toolbench uses a small plugin registry: every tool is a single object pushed into a `TOOLS` array with a `mount(container, api)` function. The shell has no knowledge of what any individual tool does — adding tool #22 means writing one new `registerTool({...})` block and nothing else.
+- Toolbench uses a small plugin registry: every tool is a single object pushed into a `TOOLS` array with a `mount(container, api)` function. The shell has no knowledge of what any individual tool does — adding tool #26 means writing one new `registerTool({...})` block and nothing else.
 - For tab cloning to carry a tool's live state, `mount()` can return `{cleanup, getState, setState}` instead of a bare cleanup function — `getState()` snapshots the tool's current fields, `setState(snapshot)` restores them into a new tab. This is optional; a tool that skips it still works, its clones just open at defaults.
 - The Markdown Notes tool lazy-loads its own dependencies (`marked`, `DOMPurify`, `highlight.js`, `Mermaid`, `KaTeX`) the first time it's opened, so the rest of the app doesn't pay for them.
 
@@ -101,7 +105,10 @@ Toolbench is an actively-developed MVP, not a finished product. Current gaps, tr
 - CodeMirror, js-yaml, and PapaParse load from a CDN, so first load needs an internet connection
 - Markdown Notes stores everything in `localStorage` (not IndexedDB / File System Access API) — fine for personal note-taking, not built for thousands of notes; no drag-to-reorder in the folder tree; no version history beyond the editor's own undo stack; pasted images are embedded as data URLs rather than managed as separate assets
 - Cron Builder supports standard 5-field Unix cron plus a basic 6-field seconds variant; Quartz-only tokens (`L`, `W`, `#`, `?`) aren't supported, and the human → cron translator only recognizes common phrasings, not free-form English
-- Not yet built: QR code generator/reader, X.509 certificate decoder, CSS/JS beautifier & minifier, an image toolbox (Base64⇄image, EXIF viewer, resize/crop/rotate), and a full ASCII/Unicode/emoji explorer — deferred because they need either additional CDN dependencies, careful correctness work (ASN.1 parsing, a real JS parser), or canvas-heavy UI that didn't fit this pass
+- X.509 decoder shows subject/issuer/validity/SAN/extensions/fingerprints but doesn't verify signatures or check revocation (no network calls happen at all — that's by design, but it means "valid" only means "well-formed and within its date range," not "trusted")
+- QR reader's webcam scanning needs camera permission and HTTPS (or localhost) to work in most browsers
+- Image Editor supports 90°-step rotation only (no arbitrary-angle rotation), and crop is a simple drag-rectangle rather than a resizable/draggable crop box
+- Not yet built: EXIF viewer, Base64⇄image utility as its own tool (Image Editor covers export, but not raw Base64 round-tripping), and a full ASCII/Unicode/emoji explorer
 
 See [CHANGELOG.md](CHANGELOG.md) for release history and [CONTRIBUTING.md](CONTRIBUTING.md) if you'd like to help close these gaps.
 
