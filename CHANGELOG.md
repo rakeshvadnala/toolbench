@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented here.
 
+## v1.3.1 (2026-07-22)
+
+### Fixed
+
+- **QR Code Generator** wasn't generating at all — it referenced `qrcode@1.5.3`, a version that doesn't exist on cdnjs (only up to 1.4.4 is published), so the library 404'd silently. Now generates live as you type, with no need to click Download first; Download just saves whatever's already on screen.
+- **JS / CSS Beautifier & Minifier** wasn't working for the same class of reason — `js-beautify@1.15.1` doesn't exist on cdnjs (starts at 1.15.4), and `jsQR`/`Terser` were never actually hosted at the cdnjs paths used. `jsQR` and `Terser` now load from jsdelivr, `qrcode` and `js-beautify` use their real cdnjs versions. All four verified to resolve before shipping.
+- Added visible error banners everywhere a lazy-loaded library is fetched, so a future CDN hiccup shows a clear message instead of failing silently
+- Added explicit input validation: invalid JS gets a real syntax-error message (via a parse check), invalid CSS gets a brace-mismatch message — previously bad input just produced confusing or silent output
+- **Image Editor crop** had no visual feedback while dragging — the overlay-drawing function was an empty stub. Rewritten with a real selection box: dimmed surround, accent border, 8 draggable resize handles, drag-to-move, and explicit Apply/Cancel actions
+- Fixed a memory leak introduced during the crop rewrite (document-level drag listeners weren't cleaned up when the tool's tab closed)
+
+## v1.3.0 (2026-07-21)
+
+### Added
+
+- **X.509 Certificate Decoder** — hand-written DER/ASN.1 parser (no external ASN.1 library); subject, issuer, validity, serial number, signature algorithm, SAN, extensions, SHA-1/SHA-256 fingerprints; supports pasting a multi-certificate chain. Verified field-for-field against real openssl-generated certificates, including an expired cert and a leaf+root chain.
+- **QR Code Generator & Reader** — generate from text/URL/email/Wi-Fi/vCard, decode from an uploaded image or live webcam scan, download as PNG
+- **JS / CSS Beautifier & Minifier** — beautify via `js-beautify`; minify JS via `Terser` (a real minifier — verified the minified output still executes correctly, not just that it looks smaller) and CSS via a safe regex pass
+- **Image Editor** — resize (aspect-locked), crop, rotate (90° steps), flip, JPEG compression with live size estimate; pure `<canvas>`, nothing uploaded anywhere
+
+### Fixed
+
+- Cron Builder: "every 5 minutes" (and similar) no longer incorrectly appended a full list of all 12 months to the human-readable description
+- QR Generator: Wi-Fi payload had a spurious extra semicolon that would have broken real Wi-Fi QR scanning
+- Image Editor: aspect-ratio lock did nothing on a freshly loaded image (only worked after a manual resize)
+
+### Known limitations
+
+- X.509 decoder checks well-formedness and date validity only — it does not verify signatures or check revocation
+- QR reader's webcam scanning needs camera permission and HTTPS (or localhost)
+- Image Editor: 90°-step rotation only, no arbitrary angle; crop is a simple drag-rectangle, not a resizable crop box
+- Not yet built: EXIF viewer, a standalone Base64⇄image utility, full ASCII/Unicode/emoji explorer
+
 ## v1.2.0 (2026-07-21)
 
 ### Added
@@ -19,7 +52,6 @@ All notable changes to this project will be documented here.
 ### Known limitations
 
 - Cron Builder: standard 5-field Unix cron + basic 6-field seconds variant only; no Quartz `L`/`W`/`#`/`?` tokens; human → cron only covers common phrasings
-- Deferred to a future release: QR code generator/reader, X.509 certificate decoder, CSS/JS beautifier & minifier, image toolbox, full ASCII/Unicode/emoji explorer
 
 ## v1.1.0 (2026-07-21)
 

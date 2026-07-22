@@ -69,6 +69,7 @@ button{font-family:inherit;}
 }
 .brand{display:flex;align-items:center;gap:8px;font-weight:700;font-size:13.5px;letter-spacing:.2px;margin-right:6px;color:var(--text-primary);}
 .brand .mark{width:20px;height:20px;border-radius:5px;background:linear-gradient(135deg,var(--accent),#a78bfa);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;color:#0d1020;}
+.brand .brand-logo{width:20px;height:20px;border-radius:5px;display:block;}
 .tb-search{
   flex:1;max-width:420px;display:flex;align-items:center;gap:8px;background:var(--bg-input);
   border:1px solid var(--border);border-radius:7px;padding:0 10px;height:30px;color:var(--text-dim);cursor:pointer;
@@ -347,17 +348,26 @@ table.kv td:first-child{color:var(--text-dim);width:150px;font-family:var(--mono
 .wikilink-hint div{padding:6px 10px;font-size:12px;color:var(--text-secondary);cursor:pointer;}
 .wikilink-hint div:hover,.wikilink-hint div.sel{background:var(--accent-soft);color:var(--accent);}
 .empty-note-state{flex:1;display:flex;align-items:center;justify-content:center;color:var(--text-dim);font-size:12.5px;flex-direction:column;gap:8px;}
+
+/* ---------- Image Editor crop overlay ---------- */
+.ie-crop-box{
+  position:absolute; box-sizing:border-box; border:2px solid var(--accent);
+  box-shadow:0 0 0 9999px rgba(0,0,0,.55); cursor:move; display:none; touch-action:none;
+}
+.ie-crop-handle{
+  position:absolute; width:12px; height:12px; margin:-6px 0 0 -6px; background:var(--accent);
+  border:2px solid #fff; border-radius:3px; box-sizing:border-box; touch-action:none;
+}
 </style>
 </head>
 <body data-theme="dark">
 <div id="app">
 
   <div id="topbar">
-    <!-- <div class="brand"><span class="mark">TB</span> Toolbench</div> -->
     <div class="brand">
-    <img src="favicon-32x32.png" alt="Toolbench Logo" class="brand-logo">
-    <span>Toolbench</span>
-</div>
+      <img src="favicon-32x32.png" alt="Toolbench Logo" class="brand-logo">
+      <span>Toolbench</span>
+    </div>
     <div class="tb-search" id="open-palette-btn">
       <span>&#128269;</span><span>Search tools & commands…</span>
       <kbd>Ctrl K</kbd>
