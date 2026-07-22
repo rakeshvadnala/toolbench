@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented here.
 
+## v1.5.0 (2026-07-22)
+
+### Changed — Visual redesign
+
+- Dark glassmorphism treatment across the app shell: frosted-glass topbar, sidebar, tab bar, cards, command palette, settings modal, and toasts (semi-transparent backgrounds + backdrop blur)
+- Ambient neon gradient glow (indigo → violet → cyan) behind the layout, visible through the translucent chrome
+- Glowing accents: neon gradient primary buttons and status bar, glowing active-tab indicator, glow-on-focus for inputs and cards
+- Light theme gets a matching frosted-glass treatment without the neon glow (glow doesn't read well on a white background), so toggling themes doesn't feel inconsistent
+- Deliberately *not* applied to code editors, textareas, or other dense-text panels — blurring a code editor would hurt readability, so those keep their original solid, high-contrast backgrounds
+
 ## v1.4.1 (2026-07-22)
 
 ### Added — JSON Path Finder
