@@ -2,6 +2,42 @@
 
 All notable changes to this project will be documented here.
 
+## v1.6.1 (2026-07-22)
+
+### Fixed — URL Encoder / Decoder
+
+- Root cause of "decoding doesn't work": neither field updated live — both Encode and Decode only ran on an explicit button click, so typing into the Encoded field did nothing until you clicked. The underlying `decodeURIComponent` logic itself was already correct (verified separately). Both fields now update instantly as you type, matching the encoder's expected behavior.
+- Malformed percent-encoded input (a stray `%`, `%zz`, a truncated UTF-8 sequence) now shows a clear, specific error message instead of failing silently — previously the only feedback was a small status-bar label that was easy to miss
+- Toggling "Component encode" now live-recomputes the encoded output instead of requiring a manual re-click
+
+### Testing
+
+- Verified with 25 targeted test cases covering: standard percent-encoded characters (`%20`, `%3A`, `%2F`, `%40`, `%25`, etc.), UTF-8/Unicode decoding (accented Latin, CJK, and 4-byte emoji sequences), malformed-input handling and recovery, live real-time behavior in both directions, encode↔decode round-trip consistency, and non-component mode (`encodeURI`/`decodeURI`)
+
+## v1.6.0 (2026-07-22)
+
+### Changed — Design system refresh
+
+- Refined the visual language toward something more restrained and premium: dialed back glow to a few signature accents (primary buttons, active tab, command palette) instead of applying it everywhere; clearer depth hierarchy between surface levels
+- Fixed icon inconsistency: 3 tools used full-color emoji (🔑🔒🖼) mixed with plain glyphs of different visual weight — swapped for monochrome symbols so the sidebar reads as one coherent icon system, and forced text-style (non-emoji) rendering everywhere icons appear
+- Added a subject-appropriate signature detail: sidebar category labels now render `// Core Tools` style, like code comments — fitting for a developer tool rather than generic decorative styling
+- Added motion tokens with full `prefers-reduced-motion` support across the app
+
+### Added — Cross-cutting UX
+
+- **Fullscreen toggle** in the topbar (and browser's native F11)
+- **Global drag-and-drop**: drop a file anywhere in the window and it routes to the matching tool, same as the Import button — extended the file→tool mapping to cover Markdown, JS/CSS, and PEM certificates too
+- **Responsive drawer sidebar** for tablet and mobile: hamburger toggle, slide-in drawer with backdrop, auto-closes after selecting a tool
+
+### Fixed
+
+- The Image Editor and Notes tool already had their own drag-and-drop handlers; adding the new global one would have caused both to fire on the same drop. Fixed by scoping the existing handlers with `stopPropagation()` — verified a dropped image opens in exactly one place, not two
+
+### Known limitations
+
+- No full custom SVG icon library yet — icons are now consistent monochrome glyphs, not a bespoke icon set
+- Complex multi-pane tools (Notes' three-pane view, side-by-side editor+preview tools) use the drawer sidebar and responsive toolbar wrapping at small widths, but don't yet have bespoke mobile-specific layouts — some remain tightest to use on a phone
+
 ## v1.5.0 (2026-07-22)
 
 ### Changed — Visual redesign
