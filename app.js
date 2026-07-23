@@ -105,7 +105,7 @@ function renderSidebar(filter=''){
         el('span',{}, t.name),
         el('span',{class:'star'+(isFav?' on':''), onclick:(e)=>{e.stopPropagation();toggleFavorite(t.id);}}, isFav?'\u2605':'\u2606')
       );
-      row.addEventListener('click', ()=>openTool(t.id));
+      row.addEventListener('click', ()=>{ openTool(t.id); if (window.matchMedia('(max-width:900px)').matches) setSidebarCollapsed(true); });
       scroll.appendChild(row);
     }
   }
@@ -116,7 +116,7 @@ function renderSidebar(filter=''){
       favBlock.appendChild(el('div',{class:'cat-title'}, el('span',{},'Favorites')));
       favTools.forEach(t=>{
         const row = el('div',{class:'tool-row'}, el('span',{class:'ic'},t.icon), el('span',{},t.name), el('span',{class:'star on', onclick:(e)=>{e.stopPropagation();toggleFavorite(t.id);}},'\u2605'));
-        row.addEventListener('click', ()=>openTool(t.id));
+        row.addEventListener('click', ()=>{ openTool(t.id); if (window.matchMedia('(max-width:900px)').matches) setSidebarCollapsed(true); });
         favBlock.appendChild(row);
       });
       scroll.prepend(favBlock);
@@ -129,6 +129,13 @@ function toggleFavorite(toolId){
   saveState(); renderSidebar($('#tool-filter').value);
 }
 
+function setSidebarCollapsed(collapsed){
+  const sb = $('#sidebar'); sb.classList.toggle('collapsed', collapsed);
+  document.body.classList.toggle('sidebar-open', !collapsed);
+  STATE.sidebarCollapsed = collapsed;
+  $('#collapse-ic').innerHTML = collapsed ? '&#9654;' : '&#9664;';
+  saveState();
+}
 function openTool(toolId){
   const tool = toolById(toolId);
   if (!tool) return;
@@ -332,12 +339,12 @@ function initShell(){
   renderTabbar(); renderActivePane();
 
   $('#tool-filter').addEventListener('input', e=>renderSidebar(e.target.value));
-  $('#sidebar-toggle').addEventListener('click', ()=>{
-    const sb = $('#sidebar'); sb.classList.toggle('collapsed');
-    STATE.sidebarCollapsed = sb.classList.contains('collapsed');
-    $('#collapse-ic').innerHTML = STATE.sidebarCollapsed ? '&#9654;' : '&#9664;';
-    saveState();
-  });
+  $('#sidebar-toggle').addEventListener('click', ()=>setSidebarCollapsed(!$('#sidebar').classList.contains('collapsed')));
+  $('#hamburger-btn').addEventListener('click', ()=>setSidebarCollapsed($('#sidebar').classList.contains('collapsed') ? false : true));
+  $('#sidebar-backdrop').addEventListener('click', ()=>setSidebarCollapsed(true));
+  // On narrow viewports the sidebar is an overlay drawer, so it should always start closed regardless of the saved desktop preference.
+  if (window.matchMedia('(max-width:900px)').matches) setSidebarCollapsed(true);
+
   $('#theme-btn').addEventListener('click', toggleTheme);
   $('#open-palette-btn').addEventListener('click', openPalette);
   $('#settings-btn').addEventListener('click', openSettings);
@@ -349,12 +356,20 @@ function initShell(){
   $('#set-restore').addEventListener('change', e=>{ STATE.restoreTabs=e.target.checked; saveState(); });
   $('#clear-workspace').addEventListener('click', ()=>{ localStorage.removeItem(STORAGE_KEY); toast('Saved workspace cleared','ok'); });
 
-  $('#import-btn').addEventListener('click', ()=>$('#hidden-file-input').click());
-  $('#hidden-file-input').addEventListener('change', async (e)=>{
-    const f = e.target.files[0]; if (!f) return;
+  function updateFullscreenIcon(){
+    $('#fullscreen-btn').innerHTML = document.fullscreenElement ? '&#10006;' : '&#10021;';
+    $('#fullscreen-btn').title = document.fullscreenElement ? 'Exit fullscreen (F11)' : 'Toggle fullscreen (F11)';
+  }
+  $('#fullscreen-btn').addEventListener('click', ()=>{
+    if (document.fullscreenElement) document.exitFullscreen();
+    else document.documentElement.requestFullscreen().catch(()=>toast('Fullscreen not available in this browser','err'));
+  });
+  document.addEventListener('fullscreenchange', updateFullscreenIcon);
+
+  async function importFile(f){
     const text = await readFileAsText(f);
     const ext = f.name.split('.').pop().toLowerCase();
-    const map = {json:'json-tool', xml:'xml-tool', sql:'sql-tool', yaml:'data-converter', yml:'data-converter', csv:'data-converter'};
+    const map = {json:'json-tool', xml:'xml-tool', sql:'sql-tool', yaml:'data-converter', yml:'data-converter', csv:'data-converter', md:'notes-tool', markdown:'notes-tool', js:'jsbeautify-tool', css:'jsbeautify-tool', pem:'x509-tool', crt:'x509-tool', cer:'x509-tool'};
     const targetId = map[ext] || 'json-tool';
     openTool(targetId);
     setTimeout(()=>{
@@ -363,7 +378,29 @@ function initShell(){
       if (inst && inst.container._importText) inst.container._importText(text, f.name);
       else toast('Imported '+f.name+' — paste not auto-filled for this tool yet');
     }, 60);
+  }
+  $('#import-btn').addEventListener('click', ()=>$('#hidden-file-input').click());
+  $('#hidden-file-input').addEventListener('change', async (e)=>{
+    const f = e.target.files[0]; if (!f) return;
+    await importFile(f);
     e.target.value='';
+  });
+
+  // Drag-and-drop a file anywhere on the window routes it into the matching tool, same as the Import button.
+  let dragDepth = 0;
+  window.addEventListener('dragenter', e=>{
+    if (!e.dataTransfer || ![...e.dataTransfer.types].includes('Files')) return;
+    e.preventDefault(); dragDepth++;
+    $('#app').classList.add('drag-over');
+  });
+  window.addEventListener('dragover', e=>{ if (e.dataTransfer && [...e.dataTransfer.types].includes('Files')) e.preventDefault(); });
+  window.addEventListener('dragleave', e=>{ dragDepth = Math.max(0, dragDepth-1); if (!dragDepth) $('#app').classList.remove('drag-over'); });
+  window.addEventListener('drop', e=>{
+    if (!e.dataTransfer || !e.dataTransfer.files.length) return;
+    e.preventDefault(); dragDepth = 0; $('#app').classList.remove('drag-over');
+    // per-tool drop zones (e.g. Image Editor's canvas) already stopPropagation on their own drop handlers,
+    // so this only fires for drops that no specific tool claimed.
+    importFile(e.dataTransfer.files[0]);
   });
 
   $('#palette-overlay').addEventListener('click', e=>{ if (e.target.id==='palette-overlay') closePalette(); });
@@ -1118,7 +1155,7 @@ registerTool({
    TOOL: JWT Decoder
    ========================================================================= */
 registerTool({
-  id:'jwt-tool', name:'JWT Decoder', category:'Developer Utilities', icon:'🔑',
+  id:'jwt-tool', name:'JWT Decoder', category:'Developer Utilities', icon:'\u26BF',
   mount(container, api){
     container.innerHTML = `
       <div class="tool-shell">
@@ -1237,17 +1274,34 @@ registerTool({
           <button class="btn" data-a="decode">← Decode</button>
           <label class="toggle-row" style="margin-left:8px"><input type="checkbox" id="url-component" checked> Component encode (spaces → %20)</label>
         </div>
+        <div class="err-banner" id="url-err"></div>
         <div class="tool-body">
           <div class="split"><div class="split-header">Raw</div><textarea class="plain-textarea" id="url-raw" placeholder="https://example.com/search?q=hello world&page=1"></textarea></div>
-          <div class="split"><div class="split-header">Encoded</div><textarea class="plain-textarea" id="url-enc"></textarea></div>
+          <div class="split"><div class="split-header">Encoded</div><textarea class="plain-textarea" id="url-enc" placeholder="https%3A%2F%2Fexample.com..."></textarea></div>
         </div>
         <div class="split-header">Query parameters <span class="grow"></span><button class="btn ghost" data-a="addparam" style="margin:4px 12px">+ Add param</button></div>
         <div id="url-params" style="max-height:180px;overflow:auto;padding:6px 12px;display:flex;flex-direction:column;gap:6px"></div>
       </div>`;
     const raw = container.querySelector('#url-raw'), enc = container.querySelector('#url-enc');
     const component = container.querySelector('#url-component');
-    function encode(){ enc.value = component.checked ? encodeURIComponent(raw.value) : encodeURI(raw.value); parseParams(); api.setStatus('Encoded', true); }
-    function decode(){ try{ raw.value = component.checked ? decodeURIComponent(enc.value) : decodeURI(enc.value); parseParams(); api.setStatus('Decoded', true); }catch(e){ api.setStatus('Invalid encoded input', false); } }
+    const bnr = container.querySelector('#url-err');
+    function showError(msg){ bnr.textContent = msg; bnr.classList.add('show'); api.setStatus(msg, false); }
+    function clearError(){ bnr.classList.remove('show'); bnr.textContent=''; }
+    function encode(){
+      try{
+        enc.value = component.checked ? encodeURIComponent(raw.value) : encodeURI(raw.value);
+        clearError(); parseParams(); api.setStatus('Encoded', true);
+      }catch(e){ showError('Could not encode: '+e.message); }
+    }
+    function decode(){
+      if (!enc.value){ clearError(); return; }
+      try{
+        raw.value = component.checked ? decodeURIComponent(enc.value) : decodeURI(enc.value);
+        clearError(); parseParams(); api.setStatus('Decoded', true);
+      }catch(e){
+        showError('Invalid percent-encoding — ' + (e.message || 'malformed URI sequence') + '. Check for a stray "%" not followed by two hex digits, or an incomplete UTF-8 byte sequence.');
+      }
+    }
     function parseParams(){
       const box = container.querySelector('#url-params'); box.innerHTML='';
       let qs = raw.value.includes('?') ? raw.value.split('?')[1] : raw.value;
@@ -1275,6 +1329,9 @@ registerTool({
     }
     container.querySelector('[data-a="encode"]').addEventListener('click', encode);
     container.querySelector('[data-a="decode"]').addEventListener('click', decode);
+    raw.addEventListener('input', debounce(encode, 200));
+    enc.addEventListener('input', debounce(decode, 200));
+    component.addEventListener('change', encode);
     container.querySelector('[data-a="addparam"]').addEventListener('click', ()=>{
       const box = container.querySelector('#url-params');
       const row = el('div',{style:'display:flex;gap:6px'},
@@ -2181,7 +2238,7 @@ registerTool({
       }
       cm.on('paste', (instance, e)=>{ if (e.clipboardData?.files?.length){ handleFiles(e.clipboardData.files); e.preventDefault(); } });
       cm.getWrapperElement().addEventListener('drop', e=>{
-        if (e.dataTransfer?.files?.length){ e.preventDefault(); handleFiles(e.dataTransfer.files); }
+        if (e.dataTransfer?.files?.length){ e.preventDefault(); e.stopPropagation(); handleFiles(e.dataTransfer.files); }
       });
     }
 
@@ -3371,7 +3428,7 @@ function pemBlocksToDER(pemText){
 }
 
 registerTool({
-  id:'x509-tool', name:'X.509 Certificate Decoder', category:'Developer Utilities', icon:'\u{1F512}',
+  id:'x509-tool', name:'X.509 Certificate Decoder', category:'Developer Utilities', icon:'\u26E8',
   mount(container, api){
     container.innerHTML = `
       <div class="tool-shell">
@@ -3796,7 +3853,7 @@ registerTool({
    Pure canvas — no external libraries, no upload, everything local.
    ========================================================================= */
 registerTool({
-  id:'image-editor-tool', name:'Image Editor', category:'Developer Utilities', icon:'\u{1F5BC}',
+  id:'image-editor-tool', name:'Image Editor', category:'Developer Utilities', icon:'\u25A3',
   mount(container, api){
     container.innerHTML = `
       <div class="tool-shell">
@@ -3873,9 +3930,9 @@ registerTool({
     // drag & drop
     canvas.addEventListener('dragover', e=>e.preventDefault());
     container.querySelector('#ie-workarea').addEventListener('dragover', e=>e.preventDefault());
-    container.querySelector('#ie-workarea').addEventListener('drop', e=>{ e.preventDefault(); const f=e.dataTransfer.files[0]; if (f && f.type.startsWith('image/')) loadImage(f); });
+    container.querySelector('#ie-workarea').addEventListener('drop', e=>{ e.preventDefault(); e.stopPropagation(); const f=e.dataTransfer.files[0]; if (f && f.type.startsWith('image/')) loadImage(f); });
     container.querySelector('#ie-empty').addEventListener('dragover', e=>e.preventDefault());
-    container.querySelector('#ie-empty').addEventListener('drop', e=>{ e.preventDefault(); const f=e.dataTransfer.files[0]; if (f && f.type.startsWith('image/')) loadImage(f); });
+    container.querySelector('#ie-empty').addEventListener('drop', e=>{ e.preventDefault(); e.stopPropagation(); const f=e.dataTransfer.files[0]; if (f && f.type.startsWith('image/')) loadImage(f); });
 
     function rotate(dir){
       const w=canvas.width, h=canvas.height;
