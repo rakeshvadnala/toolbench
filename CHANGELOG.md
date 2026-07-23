@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented here.
 
+## v1.6.2 (2026-07-22)
+
+### Fixed
+
+- The vertical divider between side-by-side panes (e.g. Raw/Encoded in URL Encoder, the two sides of Text/JSON Diff, Data Converter, etc.) was nearly invisible in dark theme. Root cause: it used the same subtle `--glass-border` token designed for glass chrome elements sitting over a blurred/ambient backdrop — but pane dividers sit between two opaque solid-color panels with no blur behind them, so that subtlety just read as invisible. Switched to the more visible `--border` token. Since this is a shared style, the fix applies consistently to every tool with side-by-side panes, not just URL Encoder/Decoder.
+
 ## v1.6.1 (2026-07-22)
 
 ### Fixed — URL Encoder / Decoder
