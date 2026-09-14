@@ -590,6 +590,7 @@ registerTool({
           <button class="btn" data-a="minify">Minify</button>
           <button class="btn ghost" data-a="sample">Load sample</button>
           <button class="btn ghost" data-a="clear">Clear</button>
+          <label class="toggle-row"><input type="checkbox" id="json-wrap"> Wrap</label>
           <span class="grow"></span>
           <button class="btn" data-a="copy">Copy</button>
           <button class="btn" data-a="download">Download</button>
@@ -744,6 +745,8 @@ registerTool({
     cm.on('change', debounce(()=>{ tryParse(); runPath(); bracketPairs = computeBracketPairs(cm.getValue()); updateBracketHighlight(); }, 220));
     cm.on('cursorActivity', updateBracketHighlight);
     container.querySelector('#json-path').addEventListener('input', debounce(runPath, 150));
+    const jsonWrapCb = container.querySelector('#json-wrap');
+    jsonWrapCb.addEventListener('change', ()=>{ cm.setOption('lineWrapping', jsonWrapCb.checked); setTimeout(()=>cm.refresh(),10); });
 
     container.querySelector('[data-a="format"]').addEventListener('click', ()=>{
       if (tryParse()) { cm.setValue(JSON.stringify(lastParsed, null, STATE.indent)); toast('Formatted','ok'); }
@@ -764,8 +767,12 @@ registerTool({
     updateBracketHighlight();
     setTimeout(()=>cm.refresh(), 30);
     return {
-      getState: ()=>({value: cm.getValue(), path: container.querySelector('#json-path').value}),
-      setState: (s)=>{ cm.setValue(s.value||''); container.querySelector('#json-path').value = s.path||''; tryParse(); runPath(); }
+      getState: ()=>({value: cm.getValue(), path: container.querySelector('#json-path').value, wrap: jsonWrapCb.checked}),
+      setState: (s)=>{
+        cm.setValue(s.value||''); container.querySelector('#json-path').value = s.path||'';
+        jsonWrapCb.checked = !!s.wrap; cm.setOption('lineWrapping', jsonWrapCb.checked);
+        tryParse(); runPath();
+      }
     };
   }
 });
@@ -782,6 +789,7 @@ registerTool({
           <button class="btn primary" data-a="format">Beautify</button>
           <button class="btn" data-a="minify">Minify</button>
           <button class="btn ghost" data-a="sample">Load sample</button>
+          <label class="toggle-row"><input type="checkbox" id="xml-wrap"> Wrap</label>
           <span class="grow"></span>
           <button class="btn" data-a="copy">Copy</button>
           <button class="btn" data-a="download">Download</button>
@@ -871,6 +879,8 @@ registerTool({
     }
     cm.on('change', debounce(()=>{ tryParse(); runPath(); }, 220));
     container.querySelector('#xml-path').addEventListener('input', debounce(runPath, 150));
+    const xmlWrapCb = container.querySelector('#xml-wrap');
+    xmlWrapCb.addEventListener('change', ()=>{ cm.setOption('lineWrapping', xmlWrapCb.checked); setTimeout(()=>cm.refresh(),10); });
     container.querySelector('[data-a="format"]').addEventListener('click', ()=>{
       try{ cm.setValue(formatXml(cm.getValue())); toast('Formatted','ok'); }catch(e){ toast(e.message,'err'); }
     });
@@ -886,8 +896,12 @@ registerTool({
     tryParse();
     setTimeout(()=>cm.refresh(),30);
     return {
-      getState: ()=>({value: cm.getValue(), path: container.querySelector('#xml-path').value}),
-      setState: (s)=>{ cm.setValue(s.value||''); container.querySelector('#xml-path').value = s.path||''; tryParse(); runPath(); }
+      getState: ()=>({value: cm.getValue(), path: container.querySelector('#xml-path').value, wrap: xmlWrapCb.checked}),
+      setState: (s)=>{
+        cm.setValue(s.value||''); container.querySelector('#xml-path').value = s.path||'';
+        xmlWrapCb.checked = !!s.wrap; cm.setOption('lineWrapping', xmlWrapCb.checked);
+        tryParse(); runPath();
+      }
     };
   }
 });
@@ -986,6 +1000,7 @@ registerTool({
         <div class="tool-toolbar">
           <label class="toggle-row"><input type="checkbox" id="diff-json"> JSON-aware (sort keys, ignore formatting)</label>
           <label class="toggle-row"><input type="checkbox" id="diff-ws"> Ignore whitespace</label>
+          <label class="toggle-row"><input type="checkbox" id="diff-wrap"> Wrap</label>
           <span class="grow"></span>
           <button class="btn primary" data-a="run">Compare</button>
         </div>
@@ -1028,15 +1043,20 @@ registerTool({
       api.setStatus(`${adds} additions, ${dels} deletions`);
     }
     container.querySelector('[data-a="run"]').addEventListener('click', run);
+    const diffWrapCb = container.querySelector('#diff-wrap');
+    diffWrapCb.addEventListener('change', ()=>{
+      container.querySelector('#diff-out').classList.toggle('wrap-on', diffWrapCb.checked);
+    });
     container.querySelector('#diff-a').value = '{\n  "name": "toolkit",\n  "version": "1.0.0",\n  "private": true\n}';
     container.querySelector('#diff-b').value = '{\n  "name": "toolkit",\n  "version": "1.1.0",\n  "private": true,\n  "license": "MIT"\n}';
     run();
     return {
       getState: ()=>({a:container.querySelector('#diff-a').value, b:container.querySelector('#diff-b').value,
-        json:container.querySelector('#diff-json').checked, ws:container.querySelector('#diff-ws').checked}),
+        json:container.querySelector('#diff-json').checked, ws:container.querySelector('#diff-ws').checked, wrap:diffWrapCb.checked}),
       setState: (s)=>{
         container.querySelector('#diff-a').value = s.a||''; container.querySelector('#diff-b').value = s.b||'';
         container.querySelector('#diff-json').checked = !!s.json; container.querySelector('#diff-ws').checked = !!s.ws;
+        diffWrapCb.checked = !!s.wrap; container.querySelector('#diff-out').classList.toggle('wrap-on', diffWrapCb.checked);
         run();
       }
     };
@@ -1056,6 +1076,7 @@ registerTool({
           <span style="color:var(--text-dim)">→</span>
           <select class="mini" id="dc-to"><option>YAML</option><option>JSON</option><option>CSV</option><option>XML</option></select>
           <button class="btn primary" data-a="convert">Convert</button>
+          <label class="toggle-row"><input type="checkbox" id="dc-wrap" checked> Wrap</label>
           <span class="grow"></span>
           <button class="btn" data-a="copy">Copy output</button>
           <button class="btn" data-a="download">Download</button>
@@ -1137,14 +1158,25 @@ registerTool({
       const to = container.querySelector('#dc-to').value.toLowerCase();
       download('converted.'+to, container.querySelector('#dc-out').value, 'text/plain');
     });
+    const dcWrapCb = container.querySelector('#dc-wrap');
+    function applyDcWrap(on){
+      [container.querySelector('#dc-in'), container.querySelector('#dc-out')].forEach(t=>{
+        t.wrap = on ? 'soft' : 'off';
+        t.style.whiteSpace = on ? '' : 'pre';
+        t.style.overflowX = on ? '' : 'auto';
+      });
+    }
+    dcWrapCb.addEventListener('change', ()=>applyDcWrap(dcWrapCb.checked));
+    applyDcWrap(dcWrapCb.checked);
     container._importText = (text,name)=>{ container.querySelector('#dc-in').value = text; api.setTitle(name); };
     convert();
     return {
-      getState: ()=>({input:container.querySelector('#dc-in').value, from:container.querySelector('#dc-from').value, to:container.querySelector('#dc-to').value}),
+      getState: ()=>({input:container.querySelector('#dc-in').value, from:container.querySelector('#dc-from').value, to:container.querySelector('#dc-to').value, wrap:dcWrapCb.checked}),
       setState: (s)=>{
         container.querySelector('#dc-in').value = s.input||'';
         if (s.from) container.querySelector('#dc-from').value = s.from;
         if (s.to) container.querySelector('#dc-to').value = s.to;
+        dcWrapCb.checked = s.wrap===undefined ? true : !!s.wrap; applyDcWrap(dcWrapCb.checked);
         convert();
       }
     };
