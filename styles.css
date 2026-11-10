@@ -7,7 +7,7 @@
 
    Reasons (one line each):
    - Palette: warm graphite / paper neutrals + one brass accent. Brass is the
-     color of bench hardware and it is not the blue/purple most dev tools use.
+     color of bench hardware and it avoids the blue and purple most dev tools use.
    - Type: IBM Plex Sans + Plex Mono (engineering-drawing heritage, designed as
      a pair, strong code glyphs). Fraunces only for the wordmark and the empty
      state heading: the one "hand-made" voice in the UI.
@@ -51,17 +51,17 @@
 
 /* More themes. Each is a neutral ramp plus one accent, nothing else, so every
    tool and state works in all of them without per-theme overrides.
-   - blueprint (dark): drafting-table navy with a cyan pencil accent, for long night sessions
+   - ember (dark): banked-forge red-brown with a coral accent, for long night sessions
    - solder (dark): circuit-board green-black with a lime accent, the high-signal option
    - sage (light): greenhouse-bench light theme, a calmer alternative to paper */
-[data-theme="blueprint"]{
-  --bg-app:#0d1b29; --bg-sidebar:#11243a; --bg-panel:#152b43; --bg-elevated:#1d3856;
-  --bg-input:#0f2033; --border:#28476a; --border-soft:#1f3a58;
-  --text-primary:#e4eef8; --text-secondary:#a9bfd6; --text-dim:#93abc6;
-  --accent:#5fd0e8; --accent-hover:#82ddf0; --accent-soft:rgba(95,208,232,.15); --accent-text:#06202a;
-  --accent-edge:#1d7f93;
-  --warning:#5fd0e8;
-  --scrim:rgba(4,10,18,.68); --shadow:0 12px 32px rgba(0,0,0,.55); --tick:#46698d;
+[data-theme="ember"]{
+  --bg-app:#1c1311; --bg-sidebar:#241915; --bg-panel:#2b1e19; --bg-elevated:#38271f;
+  --bg-input:#1f1512; --border:#4a342a; --border-soft:#3a2922;
+  --text-primary:#f3e6dc; --text-secondary:#c4ad9f; --text-dim:#ad9788;
+  --accent:#f08a5d; --accent-hover:#f5a57f; --accent-soft:rgba(240,138,93,.15); --accent-text:#2a0f04;
+  --accent-edge:#9a4a24;
+  --warning:#f08a5d;
+  --scrim:rgba(12,6,4,.68); --shadow:0 12px 32px rgba(0,0,0,.55); --tick:#7a5a4a;
 }
 [data-theme="solder"]{
   --bg-app:#101a14; --bg-sidebar:#15221a; --bg-panel:#1a2a20; --bg-elevated:#223629;
@@ -296,15 +296,29 @@ body.splitting{cursor:col-resize;user-select:none;}
 body.splitting iframe,body.splitting canvas{pointer-events:none;}
 .cm-wrap{flex:1;min-height:0;}
 
-/* Light theme code colors: same hues as the dark theme, darkened to stay readable on paper */
-[data-kind="light"] .cm-s-default .cm-keyword,[data-kind="light"] .cm-s-default .cm-attribute,[data-kind="light"] .cm-s-default .cm-property{color:#7e3fb0;}
-[data-kind="light"] .cm-s-default .cm-operator{color:#0b6f8a;}
+/* Code colors for every theme: warm hues only (amber, gold, green, coral). No blue or purple. */
+[data-kind="dark"] .cm-s-material-darker.CodeMirror,[data-kind="dark"] .cm-s-material-darker .cm-variable-2{color:var(--text-primary)!important;}
+[data-kind="dark"] .cm-s-material-darker .cm-keyword,[data-kind="dark"] .cm-s-material-darker .cm-attribute{color:#f0a35e;}
+[data-kind="dark"] .cm-s-material-darker .cm-property,[data-kind="dark"] .cm-s-material-darker .cm-def,[data-kind="dark"] .cm-s-material-darker .cm-qualifier{color:#e8c36a;}
+[data-kind="dark"] .cm-s-material-darker .cm-operator{color:#d9c9a3;}
+[data-kind="dark"] .cm-s-material-darker .cm-string{color:#a8d86a;}
+[data-kind="dark"] .cm-s-material-darker .cm-string-2,[data-kind="dark"] .cm-s-material-darker .cm-variable,[data-kind="dark"] .cm-s-material-darker .cm-type,[data-kind="dark"] .cm-s-material-darker .cm-variable-3{color:#f0a090;}
+[data-kind="dark"] .cm-s-material-darker .cm-number,[data-kind="dark"] .cm-s-material-darker .cm-tag{color:#ff7a6b;}
+[data-kind="dark"] .cm-s-material-darker .cm-atom{color:#f59e6c;}
+[data-kind="dark"] .cm-s-material-darker .cm-builtin,[data-kind="dark"] .cm-s-material-darker .cm-meta{color:#d6b04a;}
+[data-kind="dark"] .cm-s-material-darker .cm-comment{color:#9c9381;}
+[data-kind="dark"] .cm-s-material-darker .CodeMirror-gutters,[data-kind="dark"] .cm-s-material-darker .CodeMirror-linenumber{color:var(--text-dim);}
+[data-kind="dark"] .cm-s-material-darker .CodeMirror-cursor{border-left-color:var(--accent);}
+[data-kind="dark"] .cm-s-material-darker .CodeMirror-line::selection,[data-kind="dark"] .cm-s-material-darker .CodeMirror-line>span::selection,[data-kind="dark"] .cm-s-material-darker .CodeMirror-line>span>span::selection{background:rgba(227,165,58,.28);}
+[data-kind="dark"] .cm-s-material-darker .CodeMirror-matchingbracket{color:var(--text-primary)!important;}
+[data-kind="light"] .cm-s-default .cm-keyword,[data-kind="light"] .cm-s-default .cm-attribute{color:#9a4a0a;}
+[data-kind="light"] .cm-s-default .cm-property,[data-kind="light"] .cm-s-default .cm-def,[data-kind="light"] .cm-s-default .cm-qualifier{color:#7d5a00;}
+[data-kind="light"] .cm-s-default .cm-operator{color:#5a5242;}
 [data-kind="light"] .cm-s-default .cm-string{color:#2d7a1f;}
-[data-kind="light"] .cm-s-default .cm-string-2,[data-kind="light"] .cm-s-default .cm-variable{color:#b8323d;}
-[data-kind="light"] .cm-s-default .cm-number,[data-kind="light"] .cm-s-default .cm-tag{color:#c4193d;}
-[data-kind="light"] .cm-s-default .cm-atom{color:#b4491f;}
-[data-kind="light"] .cm-s-default .cm-def{color:#2f5fc4;}
-[data-kind="light"] .cm-s-default .cm-builtin,[data-kind="light"] .cm-s-default .cm-meta,[data-kind="light"] .cm-s-default .cm-qualifier,[data-kind="light"] .cm-s-default .cm-type,[data-kind="light"] .cm-s-default .cm-variable-3{color:#7d5a00;}
+[data-kind="light"] .cm-s-default .cm-string-2,[data-kind="light"] .cm-s-default .cm-variable,[data-kind="light"] .cm-s-default .cm-type,[data-kind="light"] .cm-s-default .cm-variable-3{color:#a8403a;}
+[data-kind="light"] .cm-s-default .cm-number,[data-kind="light"] .cm-s-default .cm-tag{color:#b8322a;}
+[data-kind="light"] .cm-s-default .cm-atom{color:#a8480f;}
+[data-kind="light"] .cm-s-default .cm-builtin,[data-kind="light"] .cm-s-default .cm-meta{color:#6e5200;}
 [data-kind="light"] .cm-s-default .cm-variable-2{color:var(--text-primary);}
 [data-kind="light"] .cm-s-default .cm-comment{color:#6f6652;}
 [data-kind="light"] .cm-s-default .CodeMirror-linenumber{color:var(--text-dim);}
@@ -353,14 +367,14 @@ table.kv td:first-child{color:var(--text-secondary);width:150px;font-family:var(
 .tree{font-family:var(--mono);font-size:12.5px;padding:10px;overflow:auto;flex:1;}
 .tree ul{list-style:none;margin:0;padding-left:18px;}
 .tree li{white-space:nowrap;}
-.tree .key{color:#82aaff;}
-[data-kind="light"] .tree .key{color:#2f5fc4;}
+.tree .key{color:#e8c36a;}
+[data-kind="light"] .tree .key{color:#7d5a00;}
 .tree .str{color:#c3e88d;}
 [data-kind="light"] .tree .str{color:#2d7a1f;}
-.tree .num{color:#f78c6c;}
-[data-kind="light"] .tree .num{color:#b4491f;}
-.tree .bool{color:#ff9ecb;}
-[data-kind="light"] .tree .bool{color:#a8326b;}
+.tree .num{color:#ff7a6b;}
+[data-kind="light"] .tree .num{color:#b8322a;}
+.tree .bool{color:#f0a35e;}
+[data-kind="light"] .tree .bool{color:#9a4a0a;}
 .tree .null{color:var(--text-dim);}
 .tree .toggle{cursor:pointer;color:var(--text-dim);display:inline-block;width:12px;}
 .tree .match{background:rgba(227,165,58,.28);border-radius:3px;}
@@ -507,6 +521,7 @@ table.kv td:first-child{color:var(--text-secondary);width:150px;font-family:var(
 .notes-preview table{border-collapse:collapse;width:100%;margin:10px 0;font-size:.92em;}
 .notes-preview th,.notes-preview td{border:1px solid var(--border);padding:6px 10px;text-align:left;}
 .notes-preview blockquote{border-left:3px solid var(--accent);margin:0;padding:2px 14px;color:var(--text-secondary);background:var(--accent-soft);border-radius:0 var(--radius-md) var(--radius-md) 0;}
+.notes-preview a{color:var(--accent);}
 .notes-preview a.wikilink{color:var(--accent);text-decoration:none;border-bottom:1px dashed var(--accent);cursor:pointer;}
 .notes-preview a.wikilink.broken{color:var(--danger);border-bottom-color:var(--danger);}
 .notes-preview img{max-width:100%;border-radius:var(--radius-sm);}
@@ -524,6 +539,18 @@ table.kv td:first-child{color:var(--text-secondary);width:150px;font-family:var(
 .wikilink-hint div{padding:6px 10px;font-size:12px;color:var(--text-secondary);cursor:pointer;}
 .wikilink-hint div:hover,.wikilink-hint div.sel{background:var(--accent-soft);color:var(--text-primary);}
 .empty-note-state{flex:1;display:flex;align-items:center;justify-content:center;color:var(--text-secondary);font-size:12.5px;flex-direction:column;gap:8px;}
+
+
+/* Notes code blocks (highlight.js ships a blue and purple theme; override it with the same warm palette) */
+:root{--syn-key:#f0a35e;--syn-prop:#e8c36a;--syn-str:#a8d86a;--syn-num:#ff7a6b;--syn-var:#f0a090;--syn-com:#9c9381;}
+[data-kind="light"]{--syn-key:#9a4a0a;--syn-prop:#7d5a00;--syn-str:#2d7a1f;--syn-num:#b8322a;--syn-var:#a8403a;--syn-com:#6f6652;}
+.hljs{background:transparent!important;color:var(--text-primary)!important;}
+.hljs-keyword,.hljs-doctag,.hljs-template-tag,.hljs-type,.hljs-built_in{color:var(--syn-key)!important;}
+.hljs-title,.hljs-title.class_,.hljs-title.function_,.hljs-section,.hljs-attr,.hljs-attribute,.hljs-selector-class,.hljs-selector-id{color:var(--syn-prop)!important;}
+.hljs-string,.hljs-regexp,.hljs-meta .hljs-string{color:var(--syn-str)!important;}
+.hljs-number,.hljs-literal,.hljs-symbol,.hljs-bullet,.hljs-name,.hljs-tag,.hljs-selector-tag{color:var(--syn-num)!important;}
+.hljs-variable,.hljs-template-variable,.hljs-params,.hljs-meta{color:var(--syn-var)!important;}
+.hljs-comment,.hljs-quote{color:var(--syn-com)!important;}
 
 /* ---------- Image Editor crop overlay ---------- */
 .ie-crop-box{

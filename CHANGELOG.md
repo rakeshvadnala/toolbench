@@ -4,8 +4,11 @@ All notable changes to this project will be documented here.
 
 ## Unreleased
 
+### Changed: no blue or purple anywhere
+- Replaced the Blueprint theme with Ember. Code and tree syntax colors, note code blocks, diagram colors, exported HTML, link colors and the color-tool defaults now use warm hues only. The app icons and favicons are redrawn in brass on graphite (same bracket mark). Blue-tinted emoji icons were replaced with plain glyphs.
+
 ### Added: five themes
-- Graphite (brass, default), Blueprint (cyan) and Solder (lime) for dark; Paper (brass) and Sage (green) for light. Pick one in Settings, from the command palette ("Theme: ..."), or click the theme button to step to the next. Saved dark/light choices carry over as Graphite/Paper.
+- Graphite (brass, default), Ember (coral) and Solder (lime) for dark; Paper (brass) and Sage (green) for light. Pick one in Settings, from the command palette ("Theme: ..."), or click the theme button to step to the next. Saved dark/light choices carry over as Graphite/Paper.
 
 ### Changed: workshop rebrand
 - New visual system in `styles.css` (moved out of `index.html`): warm graphite and paper neutrals, one brass accent, IBM Plex Sans/Mono, Fraunces for the wordmark. Direction is recorded in `DESIGN.md`.

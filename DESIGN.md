@@ -6,7 +6,7 @@ Dial: ENERGY 2 / RHYTHM 1 / MOTION 1
 (RHYTHM 1 on purpose: this is a tool shell, panes must be predictable.)
 
 ## Themes
-Five themes, each a neutral ramp plus one accent: Graphite (default, brass), Blueprint (cyan), Solder (lime), Paper (burnt brass), Sage (green). Colors live in `styles.css`; `THEMES` in `app.js` lists them and sets light or dark kind.
+Five themes, each a neutral ramp plus one accent: Graphite (default, brass), Ember (coral), Solder (lime), Paper (burnt brass), Sage (green). Colors live in `styles.css`; `THEMES` in `app.js` lists them and sets light or dark kind.
 
 ## Identity
 - Graphite (dark) and paper (light) warm neutrals, one brass accent. Semantic green and red are for status only.
@@ -17,4 +17,5 @@ Five themes, each a neutral ramp plus one accent: Graphite (default, brass), Blu
 - Shadow only on things that float (palette, modal, toast, mobile drawer). No blur, glow, gradients or background patterns.
 
 ## Open items for the owner
-- The wordmark is text. The PNG icons and favicons still show the old blue and purple bracket logo; a new mark has not been chosen.
+- No blue or purple anywhere: themes, syntax colors, icons and emoji are all warm. Keep it that way when adding themes.
+- The app icon keeps the original bracket concept, redrawn in brass on graphite. The topbar wordmark is text. Swap in a final logo when you have one.

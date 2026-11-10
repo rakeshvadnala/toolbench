@@ -54,7 +54,7 @@ function uid(){ return Math.random().toString(36).slice(2,10); }
 // kind decides the CodeMirror syntax theme and the light/dark-specific CSS; the colors live in styles.css.
 const THEMES = {
   graphite:  {name:'Graphite',  kind:'dark',  color:'#1a1713'},
-  blueprint: {name:'Blueprint', kind:'dark',  color:'#0d1b29'},
+  ember:     {name:'Ember',     kind:'dark',  color:'#1c1311'},
   solder:    {name:'Solder',    kind:'dark',  color:'#101a14'},
   paper:     {name:'Paper',     kind:'light', color:'#f3eee3'},
   sage:      {name:'Sage',      kind:'light', color:'#eef1e8'}
@@ -1871,7 +1871,9 @@ async function loadNotesDeps(){
     loadScript('https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.10/katex.min.js'),
     loadScript('https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.10/contrib/auto-render.min.js'),
   ]);
-  if (window.mermaid) mermaid.initialize({startOnLoad:false, theme: themeKind()==='dark'?'dark':'default'});
+  if (window.mermaid) mermaid.initialize({startOnLoad:false, theme:'base', themeVariables: themeKind()==='dark'
+    ? {darkMode:true, background:'#26221c', primaryColor:'#302b24', primaryTextColor:'#efe8da', primaryBorderColor:'#e3a53a', lineColor:'#b3a994', secondaryColor:'#3b352c', tertiaryColor:'#26221c'}
+    : {background:'#fffdf7', primaryColor:'#ebe4d4', primaryTextColor:'#26221b', primaryBorderColor:'#8f5200', lineColor:'#5a5242', secondaryColor:'#e3dbc8', tertiaryColor:'#fffdf7'}});
 }
 
 /* ---- Built-in note templates ---- */
@@ -1903,7 +1905,7 @@ registerTool({
   id:'notes-tool', name:'Markdown Notes', category:'Notes Workspace', icon:'✎',
   mount(container, api){
     const NOTES_KEY = 'toolbench_notes_v1';
-    const TAG_PALETTE = ['#e3a53a','#4fd18b','#e8a33d','#f0616d','#a78bfa','#38bdf8','#fb923c','#34d399'];
+    const TAG_PALETTE = ['#e3a53a','#4fd18b','#f0616d','#fb923c','#a3e635','#d4b483','#ef7a6e','#34d399'];
     function tagColor(tag){
       let h=0; for (let i=0;i<tag.length;i++) h = (h*31 + tag.charCodeAt(i))>>>0;
       return TAG_PALETTE[h % TAG_PALETTE.length];
@@ -1948,11 +1950,11 @@ registerTool({
             <button class="tb-icon" data-a="table" title="Insert table">&#9638;</button>
             <button class="tb-icon" data-a="check" title="Insert task item">&#9745;</button>
             <span class="tb-sep"></span>
-            <button class="tb-icon" data-a="find" title="Find & replace (Ctrl+F)">&#128269;</button>
+            <button class="tb-icon" data-a="find" title="Find & replace (Ctrl+F)">&#8981;</button>
             <span class="grow"></span>
             <button class="tb-icon" data-mode="editor" title="Editor only">&#9776;</button>
             <button class="tb-icon" data-mode="split" title="Split view">&#9707;</button>
-            <button class="tb-icon" data-mode="preview" title="Preview only">&#128065;</button>
+            <button class="tb-icon" data-mode="preview" title="Preview only">&#9635;</button>
             <span class="tb-sep"></span>
             <select class="mini" id="notes-export" title="Export">
               <option value="">Export…</option>
@@ -2423,13 +2425,13 @@ registerTool({
       else if (mode==='txt') download(safeTitle+'.txt', activeNote.content, 'text/plain');
       else if (mode==='html'){
         const body = container.querySelector('#notes-preview-body').innerHTML;
-        download(safeTitle+'.html', `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(activeNote.title)}</title>\n<style>body{font-family:system-ui,sans-serif;max-width:760px;margin:40px auto;padding:0 20px;line-height:1.6;color:#1c1e26} pre{background:#f4f5f8;padding:10px;border-radius:6px;overflow:auto} code{background:#eef0f5;padding:1px 5px;border-radius:4px} table{border-collapse:collapse} td,th{border:1px solid #ddd;padding:6px 10px}</style>\n</head><body>${body}</body></html>`, 'text/html');
+        download(safeTitle+'.html', `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(activeNote.title)}</title>\n<style>body{font-family:system-ui,sans-serif;max-width:760px;margin:40px auto;padding:0 20px;line-height:1.6;color:#26221b} pre{background:#f3eee3;padding:10px;border-radius:6px;overflow:auto} code{background:#ebe4d4;padding:1px 5px;border-radius:4px} table{border-collapse:collapse} a{color:#8f5200} td,th{border:1px solid #ddd;padding:6px 10px}</style>\n</head><body>${body}</body></html>`, 'text/html');
       }
       else if (mode==='print'){
         const body = container.querySelector('#notes-preview-body').innerHTML;
         const w = window.open('', '_blank');
         w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(activeNote.title)}</title>
-          <style>body{font-family:system-ui,sans-serif;max-width:760px;margin:30px auto;line-height:1.6}pre{background:#f4f5f8;padding:10px;border-radius:6px;overflow:auto}code{background:#eef0f5;padding:1px 5px;border-radius:4px}table{border-collapse:collapse}td,th{border:1px solid #ddd;padding:6px 10px}</style>
+          <style>body{font-family:system-ui,sans-serif;max-width:760px;margin:30px auto;line-height:1.6}pre{background:#f3eee3;padding:10px;border-radius:6px;overflow:auto}code{background:#ebe4d4;padding:1px 5px;border-radius:4px}table{border-collapse:collapse}a{color:#8f5200} td,th{border:1px solid #ddd;padding:6px 10px}</style>
           </head><body>${body}<script>window.onload=()=>window.print()<\/script></body></html>`);
         w.document.close();
       }
@@ -2772,7 +2774,7 @@ registerTool({
           <div class="card" style="margin:0 16px 16px"><h4>Palette</h4><div id="cl-palette" style="display:flex;flex-direction:column;gap:10px"></div></div>
           <div class="card" style="margin:0 16px 16px">
             <h4>Contrast checker</h4>
-            <div class="field-row"><label>Foreground</label><input type="color" id="cl-fg" value="#e6e8ee"><label style="margin-left:12px">Background</label><input type="color" id="cl-bg" value="#14151a"></div>
+            <div class="field-row"><label>Foreground</label><input type="color" id="cl-fg" value="#efe8da"><label style="margin-left:12px">Background</label><input type="color" id="cl-bg" value="#1a1713"></div>
             <div id="cl-contrast" style="padding:6px 0"></div>
           </div>
         </div>
@@ -3989,7 +3991,7 @@ registerTool({
         <div class="tool-body" style="flex-direction:column;overflow:auto">
           <div class="empty-note-state" id="ie-empty"><div style="font-size:26px">\u{1F5BC}</div><div>Open an image to start editing</div></div>
           <div id="ie-workarea" style="display:none;padding:14px;gap:14px;flex-direction:row;flex-wrap:wrap">
-            <div style="position:relative;flex:1;min-width:280px;display:flex;align-items:center;justify-content:center;background:repeating-conic-gradient(#33353f 0% 25%, #2a2c35 0% 50%) 50%/16px 16px;border-radius:10px;border:1px solid var(--border);overflow:auto;max-height:60vh">
+            <div style="position:relative;flex:1;min-width:280px;display:flex;align-items:center;justify-content:center;background:repeating-conic-gradient(#3a352c 0% 25%, #2f2a23 0% 50%) 50%/16px 16px;border-radius:10px;border:1px solid var(--border);overflow:auto;max-height:60vh">
               <div id="ie-canvas-wrap" style="position:relative;display:inline-block;line-height:0">
                 <canvas id="ie-canvas" style="max-width:100%;display:block"></canvas>
               </div>
