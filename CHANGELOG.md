@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented here.
 
+## Unreleased
+
+### Added: five themes
+- Graphite (brass, default), Blueprint (cyan) and Solder (lime) for dark; Paper (brass) and Sage (green) for light. Pick one in Settings, from the command palette ("Theme: ..."), or click the theme button to step to the next. Saved dark/light choices carry over as Graphite/Paper.
+
+### Changed: workshop rebrand
+- New visual system in `styles.css` (moved out of `index.html`): warm graphite and paper neutrals, one brass accent, IBM Plex Sans/Mono, Fraunces for the wordmark. Direction is recorded in `DESIGN.md`.
+- Removed the blue-to-purple gradient, glow, glass blur and ambient background. Radii are small and consistent, shadows only on floating layers.
+- Text wordmark replaces the old logo image in the topbar (no new logo chosen yet).
+- Page title, meta description and empty state rewritten. Added the missing `site.webmanifest`; dropped the dead `logo.svg` link.
+- Em dashes removed from interface text.
+
+### Fixed: accessibility and mobile
+- Sidebar entries, tabs, favorites, duplicate and close are real buttons, reachable and operable from the keyboard. F2 renames the focused tab.
+- Labels, landmarks, ARIA names on icon buttons, one visible focus style, pointer cursors, 44px touch targets on small screens.
+- Side-by-side panes and the Notes layout stack on narrow screens instead of overflowing.
+- Scripts load with `defer`. Filter and command palette show a message when nothing matches.
+
 ## v1.6.2 (2026-07-22)
 
 ### Fixed
