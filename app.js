@@ -1,8 +1,8 @@
 /* =========================================================================
-   TOOLBENCH — Developer Utility Toolkit
+   TOOLBENCH: Developer Utility Toolkit
    Single-file plugin architecture: every tool is an object pushed into
    TOOLS. The shell (sidebar / tabs / command palette / settings / persistence)
-   knows nothing about individual tools — it only calls tool.mount(container).
+   knows nothing about individual tools: it only calls tool.mount(container).
    Adding a new tool = pushing one object into TOOLS. Nothing else to touch.
    ========================================================================= */
 
@@ -31,7 +31,7 @@ function toast(msg, kind=''){
 }
 async function copyText(str, label='Copied to clipboard'){
   try{ await navigator.clipboard.writeText(str); toast(label,'ok'); }
-  catch(e){ toast('Copy failed — select and copy manually','err'); }
+  catch(e){ toast('Copy failed: select and copy manually','err'); }
 }
 function download(filename, content, mime='text/plain'){
   const blob = new Blob([content], {type:mime});
@@ -50,10 +50,23 @@ function fmtBytes(n){
 }
 function uid(){ return Math.random().toString(36).slice(2,10); }
 
+/* ------------------------------- themes --------------------------------- */
+// kind decides the CodeMirror syntax theme and the light/dark-specific CSS; the colors live in styles.css.
+const THEMES = {
+  graphite:  {name:'Graphite',  kind:'dark',  color:'#1a1713'},
+  blueprint: {name:'Blueprint', kind:'dark',  color:'#0d1b29'},
+  solder:    {name:'Solder',    kind:'dark',  color:'#101a14'},
+  paper:     {name:'Paper',     kind:'light', color:'#f3eee3'},
+  sage:      {name:'Sage',      kind:'light', color:'#eef1e8'}
+};
+const LEGACY_THEMES = {dark:'graphite', light:'paper'}; // values saved before multiple themes existed
+function themeKind(){ return (THEMES[STATE.theme] || THEMES.graphite).kind; }
+function cmTheme(){ return themeKind()==='dark' ? 'material-darker' : 'default'; }
+
 /* ------------------------------- state ---------------------------------- */
 const STORAGE_KEY = 'toolbench_state_v1';
 let STATE = {
-  theme: 'dark', fontSize: 13, indent: 2, restoreTabs: true,
+  theme: 'graphite', fontSize: 13, indent: 2, restoreTabs: true,
   favorites: [], openTabs: [], activeTabId: null, sidebarCollapsed: false
 };
 function loadState(){
@@ -99,29 +112,33 @@ function renderSidebar(filter=''){
     scroll.appendChild(el('div',{class:'cat-title'}, el('span',{},cat)));
     for (const t of items){
       const active = STATE.openTabs.find(tab=>tab.id===STATE.activeTabId)?.toolId === t.id;
-      const isFav = STATE.favorites.includes(t.id);
-      const row = el('div',{class:'tool-row'+(active?' active':'')},
-        el('span',{class:'ic'}, t.icon),
-        el('span',{}, t.name),
-        el('span',{class:'star'+(isFav?' on':''), onclick:(e)=>{e.stopPropagation();toggleFavorite(t.id);}}, isFav?'\u2605':'\u2606')
-      );
-      row.addEventListener('click', ()=>{ openTool(t.id); if (window.matchMedia('(max-width:900px)').matches) setSidebarCollapsed(true); });
-      scroll.appendChild(row);
+      scroll.appendChild(toolItem(t, active));
     }
   }
   if (STATE.favorites.length){
-    const favTools = STATE.favorites.map(toolById).filter(Boolean);
+    const favTools = STATE.favorites.map(toolById).filter(t=>t && (!f || t.name.toLowerCase().includes(f)));
     if (favTools.length){
       const favBlock = el('div',{});
       favBlock.appendChild(el('div',{class:'cat-title'}, el('span',{},'Favorites')));
-      favTools.forEach(t=>{
-        const row = el('div',{class:'tool-row'}, el('span',{class:'ic'},t.icon), el('span',{},t.name), el('span',{class:'star on', onclick:(e)=>{e.stopPropagation();toggleFavorite(t.id);}},'\u2605'));
-        row.addEventListener('click', ()=>{ openTool(t.id); if (window.matchMedia('(max-width:900px)').matches) setSidebarCollapsed(true); });
-        favBlock.appendChild(row);
-      });
+      favTools.forEach(t=>favBlock.appendChild(toolItem(t, false)));
       scroll.prepend(favBlock);
     }
   }
+  if (!scroll.children.length){
+    scroll.appendChild(el('div',{class:'cat-title'}, el('span',{}, f ? 'No tool matches "'+filter.trim()+'".' : 'No tools loaded.')));
+  }
+}
+// Each sidebar entry is two real buttons (open, favorite) so both work from the keyboard.
+function toolItem(t, active){
+  const isFav = STATE.favorites.includes(t.id);
+  const open = el('button',{type:'button', class:'tool-row', title:t.name},
+    el('span',{class:'ic','aria-hidden':'true'}, t.icon),
+    el('span',{class:'nm'}, t.name));
+  open.addEventListener('click', ()=>{ openTool(t.id); if (window.matchMedia('(max-width:900px)').matches) setSidebarCollapsed(true); });
+  if (active) open.setAttribute('aria-current','true');
+  const star = el('button',{type:'button', class:'star'+(isFav?' on':''), 'aria-pressed':String(isFav), 'aria-label':(isFav?'Remove ':'Add ')+t.name+(isFav?' from favorites':' to favorites')}, isFav?'\u2605':'\u2606');
+  star.addEventListener('click', ()=>toggleFavorite(t.id));
+  return el('div',{class:'tool-item'+(active?' active':'')}, open, star);
 }
 function toggleFavorite(toolId){
   const i = STATE.favorites.indexOf(toolId);
@@ -201,15 +218,19 @@ function renderTabbar(){
   const bar = $('#tabbar'); bar.innerHTML = '';
   for (const tab of STATE.openTabs){
     const tool = toolById(tab.toolId);
-    const tEl = el('div',{class:'tab'+(tab.id===STATE.activeTabId?' active':'')},
-      el('span',{},tool? tool.icon : '?'),
-      el('span',{}, tab.title || (tool?tool.name:'Tool')),
-      el('span',{class:'x', title:'Duplicate tab', onclick:(e)=>{e.stopPropagation(); duplicateTab(tab.id);}}, '\u29C9'),
-      el('span',{class:'x', onclick:(e)=>closeTab(tab.id,e)}, '\u2715')
-    );
-    tEl.addEventListener('click', ()=>setActiveTab(tab.id));
-    tEl.addEventListener('dblclick', ()=>renameTab(tab.id));
-    bar.appendChild(tEl);
+    const isActive = tab.id===STATE.activeTabId;
+    const title = tab.title || (tool?tool.name:'Tool');
+    const label = el('button',{type:'button', class:'tab-label', role:'tab', 'aria-selected':String(isActive), title:'Double-click or press F2 to rename'},
+      el('span',{class:'ic','aria-hidden':'true'}, tool? tool.icon : '?'),
+      el('span',{}, title));
+    label.addEventListener('click', ()=>setActiveTab(tab.id));
+    label.addEventListener('dblclick', ()=>renameTab(tab.id));
+    label.addEventListener('keydown', e=>{ if (e.key==='F2'){ e.preventDefault(); renameTab(tab.id); } });
+    const dup = el('button',{type:'button', class:'x', title:'Duplicate tab', 'aria-label':'Duplicate '+title}, '\u29C9');
+    dup.addEventListener('click', e=>{ e.stopPropagation(); duplicateTab(tab.id); });
+    const close = el('button',{type:'button', class:'x', title:'Close tab', 'aria-label':'Close '+title}, '\u2715');
+    close.addEventListener('click', e=>closeTab(tab.id,e));
+    bar.appendChild(el('div',{class:'tab'+(isActive?' active':'')}, label, dup, close));
   }
   $('#sb-tabs-count').textContent = STATE.openTabs.length + (STATE.openTabs.length===1?' tab open':' tabs open');
 }
@@ -225,13 +246,60 @@ function ensurePaneMounted(tab){
       setTitle: (title)=>{ tab.title = title; renderTabbar(); }
     }) || null;
   }catch(e){
-    pane.innerHTML = `<div class="empty-state"><div class="glyph">&#9888;</div><h3>Tool failed to load</h3><p>${escapeHtml(e.message||String(e))}</p></div>`;
+    pane.innerHTML = `<div class="empty-state is-error" role="alert"><h3>This tool failed to load</h3><p>${escapeHtml(e.message||String(e))}</p><p class="privacy">Reload the page to try again. If it keeps failing, your saved workspace can be cleared in Settings.</p></div>`;
     console.error(e);
   }
+  initSplitters(pane);
   // mount() may return a bare cleanup function (legacy) or {cleanup, getState, setState} for clone support
   const normalized = typeof result === 'function' ? {cleanup: result} : (result || {});
   openInstances[tab.id] = {toolId: tab.toolId, container: pane, cleanup: normalized.cleanup||null, getState: normalized.getState||null, setState: normalized.setState||null};
   return openInstances[tab.id];
+}
+/* Draggable dividers: any side-by-side .tool-body gets a splitter between adjacent .split panes.
+   Drag with mouse/touch, or focus it and use Left/Right arrows (Shift for bigger steps). Double-click resets. */
+function initSplitters(root){
+  root.querySelectorAll('.tool-body').forEach(body=>{
+    if (body.dataset.splittable || getComputedStyle(body).flexDirection !== 'row') return;
+    const panes = Array.from(body.children).filter(c=>c.classList.contains('split'));
+    if (panes.length < 2) return;
+    body.dataset.splittable = '1';
+    for (let i=0;i<panes.length-1;i++){
+      const a = panes[i], b = panes[i+1];
+      const original = [a.getAttribute('style'), b.getAttribute('style')];
+      const bar = el('div',{class:'splitter', role:'separator', 'aria-orientation':'vertical', tabindex:'0',
+        title:'Drag to resize, double-click to reset', 'aria-label':'Resize panes'});
+      a.after(bar);
+      const refreshEditors = ()=>root.querySelectorAll('.CodeMirror').forEach(n=>{ if (n.CodeMirror) n.CodeMirror.refresh(); });
+      const setWidth = (px)=>{
+        const total = a.getBoundingClientRect().width + b.getBoundingClientRect().width;
+        const min = Math.min(160, total/3);
+        px = Math.max(min, Math.min(total-min, px));
+        a.style.flex = '0 0 '+px+'px'; b.style.flex = '1 1 0'; b.style.minWidth = '0';
+        bar.setAttribute('aria-valuenow', String(Math.round(px/total*100)));
+        refreshEditors();
+      };
+      bar.addEventListener('pointerdown', e=>{
+        e.preventDefault(); bar.setPointerCapture(e.pointerId);
+        bar.classList.add('dragging'); document.body.classList.add('splitting');
+        const startX = e.clientX, startW = a.getBoundingClientRect().width;
+        const move = ev=>setWidth(startW + ev.clientX - startX);
+        const up = ()=>{
+          bar.classList.remove('dragging'); document.body.classList.remove('splitting');
+          bar.removeEventListener('pointermove', move); bar.removeEventListener('pointerup', up); bar.removeEventListener('pointercancel', up);
+        };
+        bar.addEventListener('pointermove', move); bar.addEventListener('pointerup', up); bar.addEventListener('pointercancel', up);
+      });
+      bar.addEventListener('keydown', e=>{
+        if (e.key!=='ArrowLeft' && e.key!=='ArrowRight') return;
+        e.preventDefault();
+        setWidth(a.getBoundingClientRect().width + (e.key==='ArrowRight'?1:-1) * (e.shiftKey?80:20));
+      });
+      bar.addEventListener('dblclick', ()=>{
+        [[a,original[0]],[b,original[1]]].forEach(([n,s])=>{ if (s==null) n.removeAttribute('style'); else n.setAttribute('style', s); });
+        refreshEditors();
+      });
+    }
+  });
 }
 function renderActivePane(){
   $$('.tool-pane').forEach(p=>p.classList.remove('active'));
@@ -259,7 +327,8 @@ function setStatus(text, ok=null){
 
 /* --------------------------- command palette ----------------------------- */
 const COMMANDS = [
-  {id:'cmd-theme', name:'Toggle theme (dark / light)', icon:'\u25D1', run:()=>toggleTheme()},
+  {id:'cmd-theme', name:'Next theme', icon:'\u25D1', run:()=>toggleTheme()},
+  ...Object.entries(THEMES).map(([id,t])=>({id:'cmd-theme-'+id, name:'Theme: '+t.name+' ('+t.kind+')', icon:'\u25D1', run:()=>applyTheme(id)})),
   {id:'cmd-settings', name:'Open settings', icon:'\u2699', run:()=>openSettings()},
   {id:'cmd-closeall', name:'Close all tabs', icon:'\u2715', run:()=>{ [...STATE.openTabs].forEach(t=>closeTab(t.id)); }},
 ];
@@ -280,11 +349,11 @@ function renderPalette(q){
   paletteSel = 0;
   const list = $('#palette-list'); list.innerHTML='';
   if (!paletteItems.length){
-    list.appendChild(el('div',{class:'palette-item'}, 'No matches'));
+    list.appendChild(el('div',{class:'palette-item none'}, 'Nothing matches "'+q.trim()+'". Try a tool name like "json" or "cron".'));
     return;
   }
   paletteItems.forEach((it,i)=>{
-    const row = el('div',{class:'palette-item'+(i===0?' sel':'')},
+    const row = el('div',{class:'palette-item'+(i===0?' sel':''), role:'option', 'aria-selected':String(i===0)},
       el('span',{class:'ic'}, it.icon), el('span',{}, it.name), el('span',{class:'cat'}, it.cat));
     row.addEventListener('click', ()=>{ activatePaletteItem(it); });
     row.addEventListener('mousemove', ()=>{ paletteSel=i; updatePaletteSel(); });
@@ -292,7 +361,7 @@ function renderPalette(q){
   });
 }
 function updatePaletteSel(){
-  $$('.palette-item').forEach((r,i)=>r.classList.toggle('sel', i===paletteSel));
+  $$('.palette-item').forEach((r,i)=>{ r.classList.toggle('sel', i===paletteSel); r.setAttribute('aria-selected', String(i===paletteSel)); });
   const sel = $$('.palette-item')[paletteSel];
   if (sel) sel.scrollIntoView({block:'nearest'});
 }
@@ -312,20 +381,32 @@ function openSettings(){
 }
 function closeSettings(){ $('#settings-overlay').classList.remove('show'); }
 function applyTheme(theme){
+  if (!THEMES[theme]) theme = LEGACY_THEMES[theme] || 'graphite';
   STATE.theme = theme;
   document.body.setAttribute('data-theme', theme);
-  $('#theme-btn').innerHTML = theme==='dark' ? '&#9789;' : '&#9788;';
+  document.body.setAttribute('data-kind', THEMES[theme].kind);
+  const btn = $('#theme-btn');
+  btn.innerHTML = THEMES[theme].kind==='dark' ? '&#9789;' : '&#9788;';
+  btn.title = 'Theme: '+THEMES[theme].name+'. Click for the next theme.'; btn.setAttribute('aria-label', btn.title);
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.content = THEMES[theme].color;
   $$('.CodeMirror').forEach(cmEl=>{
-    if (cmEl.CodeMirror) cmEl.CodeMirror.setOption('theme', theme==='dark' ? 'material-darker' : 'default');
+    if (cmEl.CodeMirror) cmEl.CodeMirror.setOption('theme', cmTheme());
   });
+  const sel = $('#set-theme'); if (sel) sel.value = theme;
   saveState();
 }
-function toggleTheme(){ applyTheme(STATE.theme==='dark'?'light':'dark'); }
+function toggleTheme(){
+  const ids = Object.keys(THEMES);
+  const next = ids[(ids.indexOf(STATE.theme)+1) % ids.length];
+  applyTheme(next);
+  toast('Theme: '+THEMES[next].name);
+}
 
 /* ------------------------------- boot -------------------------------------- */
 function initShell(){
   loadState();
-  applyTheme(STATE.theme || 'dark');
+  applyTheme(STATE.theme || 'graphite');
   if (STATE.sidebarCollapsed) $('#sidebar').classList.add('collapsed');
 
   renderSidebar();
@@ -376,7 +457,7 @@ function initShell(){
       const tab = STATE.openTabs.find(t=>t.toolId===targetId);
       const inst = tab && openInstances[tab.id];
       if (inst && inst.container._importText) inst.container._importText(text, f.name);
-      else toast('Imported '+f.name+' — paste not auto-filled for this tool yet');
+      else toast('Imported '+f.name+': paste not auto-filled for this tool yet');
     }, 60);
   }
   $('#import-btn').addEventListener('click', ()=>$('#hidden-file-input').click());
@@ -598,7 +679,7 @@ registerTool({
         <div class="err-banner" id="json-err"></div>
         <div class="tool-body">
           <div class="split" style="flex:1.2">
-            <div class="split-header"><span>Editor</span><span class="grow"></span><span class="pill" id="json-pill">—</span></div>
+            <div class="split-header"><span>Editor</span><span class="grow"></span><span class="pill" id="json-pill">idle</span></div>
             <div class="cm-wrap" id="json-cm"></div>
           </div>
           <div class="split" style="flex:1">
@@ -614,7 +695,7 @@ registerTool({
         </div>
       </div>`;
     const cm = CodeMirror(container.querySelector('#json-cm'), {
-      mode:'application/json', lineNumbers:true, theme: STATE.theme==='dark'?'material-darker':'default',
+      mode:'application/json', lineNumbers:true, theme: cmTheme(),
       value:'{\n  "store": {\n    "book": [\n      {"title": "Sapiens", "author": "Yuval Noah Harari", "price": 24.5},\n      {"title": "Clean Code", "author": "Robert C. Martin", "price": 32.0}\n    ]\n  }\n}',
       indentUnit: STATE.indent, tabSize: STATE.indent, viewportMargin: 60
     });
@@ -797,7 +878,7 @@ registerTool({
         <div class="err-banner" id="xml-err"></div>
         <div class="tool-body">
           <div class="split" style="flex:1.2">
-            <div class="split-header"><span>Editor</span><span class="grow"></span><span class="pill" id="xml-pill">—</span></div>
+            <div class="split-header"><span>Editor</span><span class="grow"></span><span class="pill" id="xml-pill">idle</span></div>
             <div class="cm-wrap" id="xml-cm"></div>
           </div>
           <div class="split" style="flex:1">
@@ -811,7 +892,7 @@ registerTool({
         </div>
       </div>`;
     const cm = CodeMirror(container.querySelector('#xml-cm'), {
-      mode:'xml', lineNumbers:true, theme: STATE.theme==='dark'?'material-darker':'default',
+      mode:'xml', lineNumbers:true, theme: cmTheme(),
       value:'<store>\n  <book>\n    <title>Sapiens</title>\n    <author>Yuval Noah Harari</author>\n    <price>24.5</price>\n  </book>\n  <book>\n    <title>Clean Code</title>\n    <author>Robert C. Martin</author>\n    <price>32.0</price>\n  </book>\n</store>',
       indentUnit: STATE.indent, tabSize: STATE.indent, viewportMargin:60
     });
@@ -931,7 +1012,7 @@ registerTool({
         </div>
       </div>`;
     const cm = CodeMirror(container.querySelector('#sql-cm'), {
-      mode:'text/x-sql', lineNumbers:true, theme: STATE.theme==='dark'?'material-darker':'default',
+      mode:'text/x-sql', lineNumbers:true, theme: cmTheme(),
       value:"select u.id, u.name, count(o.id) as orders from users u left join orders o on o.user_id = u.id where u.active = 1 group by u.id, u.name having count(o.id) > 0 order by orders desc limit 20;",
       indentUnit: STATE.indent, tabSize: STATE.indent, viewportMargin:60
     });
@@ -1191,7 +1272,7 @@ registerTool({
   mount(container, api){
     container.innerHTML = `
       <div class="tool-shell">
-        <div class="tool-toolbar"><span style="font-size:12px;color:var(--text-dim)">Paste a JSON Web Token — decoding happens locally, nothing is sent anywhere.</span></div>
+        <div class="tool-toolbar"><span style="font-size:12px;color:var(--text-dim)">Paste a JSON Web Token: decoding happens locally, nothing is sent anywhere.</span></div>
         <div class="tool-body" style="flex-direction:column">
           <textarea class="plain-textarea" id="jwt-in" style="flex:0 0 110px" placeholder="eyJhbGciOi...header.payload.signature"></textarea>
           <div class="err-banner" id="jwt-err"></div>
@@ -1214,7 +1295,7 @@ registerTool({
         if (['iat','exp','nbf'].includes(k) && typeof v==='number'){
           display += `  (${new Date(v*1000).toLocaleString()})`;
         }
-        const label = CLAIM_NAMES[k] ? `${k} — ${CLAIM_NAMES[k]}` : k;
+        const label = CLAIM_NAMES[k] ? `${k}: ${CLAIM_NAMES[k]}` : k;
         tbody.appendChild(el('tr',{}, el('td',{},label), el('td',{}, display)));
       });
     }
@@ -1282,7 +1363,7 @@ registerTool({
     container.querySelector('#b64-file').addEventListener('change', (e)=>{
       const f = e.target.files[0]; if (!f) return;
       const r = new FileReader();
-      r.onload = ()=>{ enc.value = r.result.split(',')[1]; api.setTitle('Base64 — '+f.name); toast('Encoded '+f.name,'ok'); };
+      r.onload = ()=>{ enc.value = r.result.split(',')[1]; api.setTitle('Base64: '+f.name); toast('Encoded '+f.name,'ok'); };
       r.readAsDataURL(f);
     });
     container._importText = (text)=>{ plain.value = text; encode(); };
@@ -1331,7 +1412,7 @@ registerTool({
         raw.value = component.checked ? decodeURIComponent(enc.value) : decodeURI(enc.value);
         clearError(); parseParams(); api.setStatus('Decoded', true);
       }catch(e){
-        showError('Invalid percent-encoding — ' + (e.message || 'malformed URI sequence') + '. Check for a stray "%" not followed by two hex digits, or an incomplete UTF-8 byte sequence.');
+        showError('Invalid percent-encoding: ' + (e.message || 'malformed URI sequence') + '. Check for a stray "%" not followed by two hex digits, or an incomplete UTF-8 byte sequence.');
       }
     }
     function parseParams(){
@@ -1398,7 +1479,7 @@ registerTool({
           <input class="mini grow" id="rx-pattern" placeholder="\\b[A-Z][a-z]+\\b" style="flex:1">
           <span style="color:var(--text-dim)">/</span>
           <input class="mini" id="rx-flags" value="g" style="width:60px" placeholder="flags">
-          <span class="pill" id="rx-pill">—</span>
+          <span class="pill" id="rx-pill">idle</span>
         </div>
         <div class="chip-list" id="rx-examples"></div>
         <div class="tool-body">
@@ -1425,7 +1506,7 @@ registerTool({
       const text = container.querySelector('#rx-text').value;
       const pill = container.querySelector('#rx-pill');
       const out = container.querySelector('#rx-out'); out.innerHTML='';
-      if (!pat){ pill.textContent='—'; pill.className='pill'; container.querySelector('#rx-count').textContent=''; return; }
+      if (!pat){ pill.textContent='idle'; pill.className='pill'; container.querySelector('#rx-count').textContent=''; return; }
       let re;
       try{ re = new RegExp(pat, flags.includes('g')?flags:flags+'g'); pill.textContent='Valid'; pill.className='pill ok'; api.setStatus('Valid pattern', true); }
       catch(e){ pill.textContent='Invalid'; pill.className='pill err'; container.querySelector('#rx-count').textContent=''; api.setStatus(e.message, false); return; }
@@ -1716,7 +1797,7 @@ registerTool({
       FORMATS.forEach(f=>{
         if (f.id===skipId) return;
         try{ container.querySelector('#ts-'+f.id).value = f.fromDate(date); clearFieldError(f.id); }
-        catch(e){ /* e.g. a date before 1601 can't be shown as FileTime — leave that field's last value */ }
+        catch(e){ /* e.g. a date before 1601 can't be shown as FileTime: leave that field's last value */ }
       });
       if (skipId!=='picker') container.querySelector('#ts-picker').value = toDatetimeLocalValue(date);
       container.querySelector('#ts-local').value = date.toString();
@@ -1757,7 +1838,7 @@ registerTool({
 document.addEventListener('DOMContentLoaded', initShell);
 
 /* =========================================================================
-   Lazy asset loader — the Notes tool's dependencies (marked, DOMPurify,
+   Lazy asset loader: the Notes tool's dependencies (marked, DOMPurify,
    highlight.js, mermaid, KaTeX) are only fetched the first time someone
    actually opens that tool, so the rest of the app doesn't pay for them.
    ========================================================================= */
@@ -1790,19 +1871,19 @@ async function loadNotesDeps(){
     loadScript('https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.10/katex.min.js'),
     loadScript('https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.10/contrib/auto-render.min.js'),
   ]);
-  if (window.mermaid) mermaid.initialize({startOnLoad:false, theme: STATE.theme==='dark'?'dark':'default'});
+  if (window.mermaid) mermaid.initialize({startOnLoad:false, theme: themeKind()==='dark'?'dark':'default'});
 }
 
 /* ---- Built-in note templates ---- */
 const NOTE_TEMPLATES = {
   'README': '# Project Name\n\nOne-line description of what this project does.\n\n## Installation\n\n```bash\nnpm install\n```\n\n## Usage\n\n```js\n// example\n```\n\n## License\n\nMIT',
-  'Meeting Notes': '# Meeting Notes — {{date}}\n\n**Attendees:** \n**Goal:** \n\n## Discussion\n\n- \n\n## Decisions\n\n- \n\n## Action Items\n\n- [ ] \n',
+  'Meeting Notes': '# Meeting Notes: {{date}}\n\n**Attendees:** \n**Goal:** \n\n## Discussion\n\n- \n\n## Decisions\n\n- \n\n## Action Items\n\n- [ ] \n',
   'Daily Note': '# {{date}}\n\n## Focus\n\n- \n\n## Notes\n\n- \n\n## Tomorrow\n\n- [ ] \n',
   'Project Documentation': '# Project Documentation\n\n## Overview\n\n## Goals\n\n## Scope\n\n## Timeline\n\n## Stakeholders\n',
   'API Documentation': '# API Reference\n\n## `GET /resource`\n\n**Description:** \n\n**Params**\n\n| Name | Type | Required | Description |\n|---|---|---|---|\n| id | string | yes | |\n\n**Response**\n\n```json\n{}\n```\n',
   'Release Notes': '# Release {{date}}\n\n## Added\n\n- \n\n## Fixed\n\n- \n\n## Changed\n\n- \n',
   'Architecture Design': '# Architecture Design\n\n## Context\n\n## Decision\n\n## Consequences\n\n## Alternatives Considered\n',
-  'Sprint Planning': '# Sprint Planning — {{date}}\n\n## Sprint Goal\n\n## Committed Items\n\n- [ ] \n\n## Capacity\n\n## Risks\n',
+  'Sprint Planning': '# Sprint Planning: {{date}}\n\n## Sprint Goal\n\n## Committed Items\n\n- [ ] \n\n## Capacity\n\n## Risks\n',
   'Bug Report': '# Bug Report\n\n**Summary:** \n**Environment:** \n**Steps to Reproduce**\n\n1. \n\n**Expected**\n\n**Actual**\n\n**Severity:** ',
   'Technical Design Document': '# Technical Design Document\n\n## Problem Statement\n\n## Proposed Solution\n\n## Data Model\n\n## API Changes\n\n## Rollout Plan\n',
   'Knowledge Base Article': '# Article Title\n\n## Summary\n\n## Details\n\n## Related\n\n- [[]]\n',
@@ -1814,15 +1895,15 @@ function fillTemplate(t){ return t.replace(/\{\{date\}\}/g, new Date().toISOStri
    TOOL: Markdown Notes Workspace
    Scope note: uses localStorage (not IndexedDB / File System Access API),
    no drag-reorder, no version history beyond CodeMirror's own undo stack,
-   no virtual-scroll for very large note counts. Everything else — nested
+   no virtual-scroll for very large note counts. Everything else: nested
    folders, tags, full-text search, [[wikilinks]] with autocomplete and
-   backlinks, GFM + Mermaid + KaTeX preview, templates, export — is real.
+   backlinks, GFM + Mermaid + KaTeX preview, templates, export: is real.
    ========================================================================= */
 registerTool({
   id:'notes-tool', name:'Markdown Notes', category:'Notes Workspace', icon:'✎',
   mount(container, api){
     const NOTES_KEY = 'toolbench_notes_v1';
-    const TAG_PALETTE = ['#6c8dff','#4fd18b','#e8a33d','#f0616d','#a78bfa','#38bdf8','#fb923c','#34d399'];
+    const TAG_PALETTE = ['#e3a53a','#4fd18b','#e8a33d','#f0616d','#a78bfa','#38bdf8','#fb923c','#34d399'];
     function tagColor(tag){
       let h=0; for (let i=0;i<tag.length;i++) h = (h*31 + tag.charCodeAt(i))>>>0;
       return TAG_PALETTE[h % TAG_PALETTE.length];
@@ -1836,13 +1917,13 @@ registerTool({
       return {
         folders: [{id:'f-projects', name:'Projects', parentId:null}, {id:'f-personal', name:'Personal', parentId:null}],
         notes: [{id:welcomeId, title:'Welcome to Notes', folderId:null, content:
-          '# Welcome to Markdown Notes\n\nThis is a local, offline notes workspace built into Toolbench.\n\n## Try it out\n\n- Type Markdown on the left, see it rendered on the right\n- Link to another note with `[[Project Ideas]]` — type `[[` for suggestions\n- Add tags below the title\n- Use the template picker in the toolbar to start from a README, meeting notes, a bug report, and more\n\n```js\nconsole.log("code blocks are syntax-highlighted");\n```\n\n| Feature | Status |\n|---|---|\n| Tags | ✅ |\n| Backlinks | ✅ |\n| Mermaid | ✅ |\n\n- [x] Read this note\n- [ ] Create your own\n',
+          '# Welcome to Markdown Notes\n\nThis is a local, offline notes workspace built into Toolbench.\n\n## Try it out\n\n- Type Markdown on the left, see it rendered on the right\n- Link to another note with `[[Project Ideas]]`: type `[[` for suggestions\n- Add tags below the title\n- Use the template picker in the toolbar to start from a README, meeting notes, a bug report, and more\n\n```js\nconsole.log("code blocks are syntax-highlighted");\n```\n\n| Feature | Status |\n|---|---|\n| Tags | ✅ |\n| Backlinks | ✅ |\n| Mermaid | ✅ |\n\n- [x] Read this note\n- [ ] Create your own\n',
           tags:['guide'], favorite:true, pinned:false, createdAt:Date.now(), updatedAt:Date.now()}],
         activeNoteId: welcomeId
       };
     }
     let data = loadData();
-    function save(){ try{ localStorage.setItem(NOTES_KEY, JSON.stringify(data)); }catch(e){ toast('Could not save — storage may be full','err'); } }
+    function save(){ try{ localStorage.setItem(NOTES_KEY, JSON.stringify(data)); }catch(e){ toast('Could not save: storage may be full','err'); } }
 
     container.innerHTML = `
       <div class="notes-shell">
@@ -2060,7 +2141,7 @@ registerTool({
       });
 
       cm = CodeMirror(col.querySelector('#notes-cm'), {
-        mode:'markdown', lineNumbers:false, lineWrapping:true, theme: STATE.theme==='dark'?'material-darker':'default',
+        mode:'markdown', lineNumbers:false, lineWrapping:true, theme: cmTheme(),
         value: activeNote.content, viewportMargin: 500, indentUnit: STATE.indent, tabSize: STATE.indent
       });
       cm.on('change', ()=>{ activeNote.content = cm.getValue(); scheduleSave(); renderPreviewDebounced(); updateStatusbar(); });
@@ -2123,12 +2204,12 @@ registerTool({
       if (!depsLoaded){
         body.innerHTML = '<div style="color:var(--text-dim)">Loading preview engine…</div>';
         try{ await loadNotesDeps(); depsLoaded = true; }
-        catch(e){ body.innerHTML = '<div style="color:var(--danger)">Could not load preview libraries — check your connection.</div>'; return; }
+        catch(e){ body.innerHTML = '<div style="color:var(--danger)">Could not load preview libraries: check your connection.</div>'; return; }
         if (!activeNote) return;
       }
       let html;
       try{
-        const pre = wikilinkPreprocess(activeNote.content || '*Nothing here yet — start typing on the left.*');
+        const pre = wikilinkPreprocess(activeNote.content || '*Nothing here yet: start typing on the left.*');
         html = marked.parse(pre, {gfm:true, breaks:false});
         html = DOMPurify.sanitize(html, {ADD_ATTR:['data-title','class','target'], ADD_TAGS:['iframe']});
       }catch(e){ html = '<div style="color:var(--danger)">Render error: '+escapeHtml(e.message)+'</div>'; }
@@ -2402,7 +2483,7 @@ registerTool({
   mount(container, api){
     container.innerHTML = `
       <div class="tool-shell">
-        <div class="tool-toolbar"><span style="font-size:12px;color:var(--text-dim)">Enter a value in any base — the others update live. Non-negative integers only.</span></div>
+        <div class="tool-toolbar"><span style="font-size:12px;color:var(--text-dim)">Enter a value in any base: the others update live. Non-negative integers only.</span></div>
         <div class="err-banner" id="nb-err"></div>
         <div class="stack" style="padding:14px;max-width:560px">
           <div class="field-row" style="padding:8px 0"><label style="min-width:70px">Decimal</label><input class="mini grow" id="nb-dec" style="font-family:var(--mono)"></div>
@@ -2445,7 +2526,7 @@ registerTool({
   mount(container, api){
     container.innerHTML = `
       <div class="tool-shell">
-        <textarea class="plain-textarea" id="tc-in" style="flex:0 0 90px" placeholder="Type or paste text — e.g. hello world example"></textarea>
+        <textarea class="plain-textarea" id="tc-in" style="flex:0 0 90px" placeholder="Type or paste text: e.g. hello world example"></textarea>
         <div class="stack" style="padding:10px 12px" id="tc-out"></div>
       </div>`;
     const CASES = [
@@ -2471,7 +2552,7 @@ registerTool({
       const out = container.querySelector('#tc-out'); out.innerHTML='';
       CASES.forEach(([name,fn])=>{
         const val = words.length ? fn(words) : '';
-        const row = el('div',{class:'hash-row'}, el('span',{class:'algo', style:'width:120px'}, name), el('span',{class:'val'}, val||'—'),
+        const row = el('div',{class:'hash-row'}, el('span',{class:'algo', style:'width:120px'}, name), el('span',{class:'val'}, val||'empty'),
           el('span',{class:'icon-btn', onclick:()=>copyText(val)}, '⧉'));
         out.appendChild(row);
       });
@@ -2580,21 +2661,21 @@ registerTool({
    TOOL: HTTP Status Code Reference
    ========================================================================= */
 const HTTP_STATUSES = [
-  [100,'Continue','Interim response — the client should continue the request.'],
+  [100,'Continue','Interim response: the client should continue the request.'],
   [101,'Switching Protocols','Server is switching protocols as requested (e.g. to WebSocket).'],
   [200,'OK','Standard success response for GET/PUT/POST.'],
-  [201,'Created','Request succeeded and a new resource was created — typical POST response.'],
+  [201,'Created','Request succeeded and a new resource was created: typical POST response.'],
   [202,'Accepted','Request accepted for processing but not yet completed.'],
-  [204,'No Content','Success with no response body — common for DELETE.'],
-  [206,'Partial Content','Range request fulfilled — used for resumable downloads/streaming.'],
+  [204,'No Content','Success with no response body: common for DELETE.'],
+  [206,'Partial Content','Range request fulfilled: used for resumable downloads/streaming.'],
   [301,'Moved Permanently','Resource permanently moved to a new URL; clients should update links.'],
   [302,'Found','Resource temporarily at a different URL.'],
-  [304,'Not Modified','Cached version is still valid — used with ETag / If-Modified-Since.'],
+  [304,'Not Modified','Cached version is still valid: used with ETag / If-Modified-Since.'],
   [307,'Temporary Redirect','Like 302 but guarantees the method/body are preserved.'],
   [308,'Permanent Redirect','Like 301 but guarantees the method/body are preserved.'],
   [400,'Bad Request','Malformed request syntax or invalid parameters.'],
   [401,'Unauthorized','Authentication is required and has failed or not been provided.'],
-  [402,'Payment Required','Reserved for future use — occasionally used by APIs for billing.'],
+  [402,'Payment Required','Reserved for future use: occasionally used by APIs for billing.'],
   [403,'Forbidden','Authenticated but not permitted to access this resource.'],
   [404,'Not Found','The requested resource does not exist.'],
   [405,'Method Not Allowed','HTTP method isn\u2019t supported for this resource.'],
@@ -2606,10 +2687,10 @@ const HTTP_STATUSES = [
   [413,'Payload Too Large','Request body exceeds server limits.'],
   [414,'URI Too Long','The request URI is too long for the server to process.'],
   [415,'Unsupported Media Type','Request payload format isn\u2019t supported.'],
-  [418,"I'm a teapot",'April Fools\u2019 joke from RFC 2324 — sometimes used intentionally in APIs.'],
+  [418,"I'm a teapot",'April Fools\u2019 joke from RFC 2324: sometimes used intentionally in APIs.'],
   [422,'Unprocessable Entity','Well-formed request but semantically invalid (common for validation errors).'],
   [425,'Too Early','Server unwilling to process a request that might be replayed.'],
-  [429,'Too Many Requests','Client has sent too many requests — rate limiting.'],
+  [429,'Too Many Requests','Client has sent too many requests: rate limiting.'],
   [431,'Request Header Fields Too Large','Header section is too large.'],
   [451,'Unavailable For Legal Reasons','Resource withheld for legal reasons.'],
   [500,'Internal Server Error','Generic server-side failure.'],
@@ -2677,7 +2758,7 @@ registerTool({
         <div class="tool-body" style="flex-direction:column;overflow:auto">
           <div style="display:flex;gap:16px;padding:16px;flex-wrap:wrap">
             <div style="display:flex;flex-direction:column;gap:10px;align-items:center">
-              <input type="color" id="cl-picker" value="#6c8dff" style="width:110px;height:110px;border:none;border-radius:14px;cursor:pointer;background:none">
+              <input type="color" id="cl-picker" value="#e3a53a" style="width:110px;height:110px;border:none;border-radius:14px;cursor:pointer;background:none">
               <div id="cl-swatch" style="width:110px;height:36px;border-radius:8px;border:1px solid var(--border)"></div>
             </div>
             <div class="stack" style="flex:1;min-width:260px">
@@ -2722,7 +2803,7 @@ registerTool({
       const hue2rgb=(p,q,t)=>{ if(t<0)t+=1; if(t>1)t-=1; if(t<1/6) return p+(q-p)*6*t; if(t<1/2) return q; if(t<2/3) return p+(q-p)*(2/3-t)*6; return p; };
       return { r:Math.round(hue2rgb(p,q,h+1/3)*255), g:Math.round(hue2rgb(p,q,h)*255), b:Math.round(hue2rgb(p,q,h-1/3)*255) };
     }
-    let current = hexToRgb('#6c8dff'), alpha = 100;
+    let current = hexToRgb('#e3a53a'), alpha = 100;
     function updateFields(skip){
       const hex = rgbToHex(current), hsl = rgbToHsl(current);
       if (skip!=='hex') container.querySelector('#cl-hex').value = hex;
@@ -2882,7 +2963,7 @@ registerTool({
 });
 
 /* =========================================================================
-   TOOL: CSV <-> JSON Converter (dedicated — richer than the generic Data Converter)
+   TOOL: CSV <-> JSON Converter (dedicated: richer than the generic Data Converter)
    ========================================================================= */
 registerTool({
   id:'csvjson-tool', name:'CSV \u2194 JSON', category:'Core Tools', icon:'\u2317',
@@ -2905,7 +2986,7 @@ registerTool({
 Ada Lovelace,Engineer,London,SW1A
 Grace Hopper,Admiral,Arlington,22201</textarea></div>
           <div class="split">
-            <div class="split-header">Preview <span class="grow"></span><span class="pill" id="cj-status">—</span></div>
+            <div class="split-header">Preview <span class="grow"></span><span class="pill" id="cj-status">idle</span></div>
             <div id="cj-preview" style="flex:0 0 45%;overflow:auto;border-bottom:1px solid var(--border)"></div>
             <div class="split-header">Output</div>
             <textarea class="plain-textarea" id="cj-out" readonly></textarea>
@@ -3008,7 +3089,7 @@ Grace Hopper,Admiral,Arlington,22201</textarea></div>
    TOOL: Cron Builder, Parser, Human-readable Translator & Next-run Calculator
    Scope note: standard 5-field Unix cron (minute hour day month weekday),
    plus an optional leading seconds field for basic Quartz-style expressions.
-   Special Quartz characters (L, W, #, ?) are not supported — lists, ranges,
+   Special Quartz characters (L, W, #, ?) are not supported: lists, ranges,
    steps, and wildcards are. Human -> cron covers common phrasings, not
    full natural language.
    ========================================================================= */
@@ -3171,7 +3252,7 @@ registerTool({
         <div class="tool-toolbar">
           <select class="mini" id="cr-preset"><option value="">Presets…</option>${CRON_PRESETS.map(([n,e])=>`<option value="${escapeHtml(e)}">${escapeHtml(n)}</option>`).join('')}</select>
           <input class="mini grow" id="cr-expr" style="font-family:var(--mono);max-width:220px" value="*/5 * * * *">
-          <span class="pill" id="cr-pill">—</span>
+          <span class="pill" id="cr-pill">idle</span>
         </div>
         <div class="err-banner" id="cr-err"></div>
         <div class="grid-2" style="grid-template-columns:1fr 1fr">
@@ -3291,7 +3372,7 @@ registerTool({
       const phrase = container.querySelector('#cr-h2c').value;
       const cron = humanToCron(phrase);
       if (cron){ container.querySelector('#cr-expr').value = cron; evaluate(); toast('Translated to cron','ok'); }
-      else toast('Could not translate that phrase — try e.g. "every 5 minutes" or "every day at 9am"','err');
+      else toast('Could not translate that phrase: try e.g. "every 5 minutes" or "every day at 9am"','err');
     });
     evaluate();
     return {
@@ -3303,10 +3384,10 @@ registerTool({
 
 /* =========================================================================
    X.509 CERTIFICATE PARSING CORE (pure functions, DOM-independent)
-   Hand-rolled minimal DER/ASN.1 reader — no external crypto/ASN.1 library.
+   Hand-rolled minimal DER/ASN.1 reader: no external crypto/ASN.1 library.
    Verified field-for-field (version, serial, issuer, subject, validity,
    SAN, extensions, fingerprints) against real openssl-generated
-   certificates during development; not a general-purpose ASN.1 parser —
+   certificates during development; not a general-purpose ASN.1 parser.
    covers exactly what X.509 v1/v3 certificates need.
    ========================================================================= */
 function derReadLength(bytes, pos){
@@ -3419,7 +3500,7 @@ function parseCertificateDER(bytes){
   const validityChildren = derReadAll(bytes, tbsChildren[idx].contentStart, tbsChildren[idx].contentEnd); idx++;
   const notBefore = derTime(bytes, validityChildren[0]), notAfter = derTime(bytes, validityChildren[1]);
   const subject = derParseName(bytes, tbsChildren[idx].contentStart, tbsChildren[idx].contentEnd); idx++;
-  idx++; // subjectPublicKeyInfo — not decoded in detail
+  idx++; // subjectPublicKeyInfo: not decoded in detail
   let extensions = [];
   for (; idx<tbsChildren.length; idx++){
     const t = tbsChildren[idx];
@@ -3464,7 +3545,7 @@ registerTool({
   mount(container, api){
     container.innerHTML = `
       <div class="tool-shell">
-        <div class="tool-toolbar"><span style="font-size:12px;color:var(--text-dim)">Paste one or more PEM certificates — parsing happens entirely in your browser.</span></div>
+        <div class="tool-toolbar"><span style="font-size:12px;color:var(--text-dim)">Paste one or more PEM certificates: parsing happens entirely in your browser.</span></div>
         <div class="tool-body" style="flex-direction:column">
           <textarea class="plain-textarea" id="x5-in" style="flex:0 0 160px;font-size:11.5px" placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----"></textarea>
           <div class="err-banner" id="x5-err"></div>
@@ -3601,7 +3682,7 @@ registerTool({
       try{ await loadQrDeps(); depsLoaded = true; return true; }
       catch(e){
         const bnr = container.querySelector('#qr-err');
-        bnr.textContent = 'Could not load the QR library from the CDN — check your internet connection and reload. ('+e.message+')';
+        bnr.textContent = 'Could not load the QR library from the CDN: check your internet connection and reload. ('+e.message+')';
         bnr.classList.add('show');
         api.setStatus('Failed to load QR library', false);
         return false;
@@ -3760,7 +3841,7 @@ registerTool({
 /* =========================================================================
    TOOL: JavaScript / CSS Beautifier & Minifier
    Lazy-loads js-beautify (beautify, real parser-based, not regex) and
-   Terser (minify, a real minifier — not a naive regex strip, which would
+   Terser (minify, a real minifier: not a naive regex strip, which would
    risk silently corrupting code around strings/regex literals/ASI).
    ========================================================================= */
 async function loadBeautifyDeps(){
@@ -3790,12 +3871,12 @@ registerTool({
         </div>
       </div>`;
     const cmIn = CodeMirror(container.querySelector('#jb-in-cm'), {
-      mode:'javascript', lineNumbers:true, theme: STATE.theme==='dark'?'material-darker':'default',
+      mode:'javascript', lineNumbers:true, theme: cmTheme(),
       value:'function greet(name){\nif(!name){name="world"}\nconsole.log("Hello, "+name+"!")\n}\ngreet();',
       indentUnit: STATE.indent, tabSize: STATE.indent, viewportMargin:60
     });
     const cmOut = CodeMirror(container.querySelector('#jb-out-cm'), {
-      mode:'javascript', lineNumbers:true, theme: STATE.theme==='dark'?'material-darker':'default',
+      mode:'javascript', lineNumbers:true, theme: cmTheme(),
       readOnly:true, viewportMargin:60
     });
     function checkJsSyntax(code){
@@ -3804,8 +3885,8 @@ registerTool({
     }
     function checkCssBraces(code){
       let depth = 0;
-      for (const ch of code){ if (ch==='{') depth++; else if (ch==='}') depth--; if (depth<0) return {ok:false, error:'Unmatched "}" — a closing brace appears with no matching "{"'}; }
-      if (depth>0) return {ok:false, error:`${depth} unclosed "{" — missing ${depth} closing brace${depth===1?'':'s'}`};
+      for (const ch of code){ if (ch==='{') depth++; else if (ch==='}') depth--; if (depth<0) return {ok:false, error:'Unmatched "}": a closing brace appears with no matching "{"'}; }
+      if (depth>0) return {ok:false, error:`${depth} unclosed "{": missing ${depth} closing brace${depth===1?'':'s'}`};
       return {ok:true};
     }
     let depsLoaded = false;
@@ -3814,7 +3895,7 @@ registerTool({
       try{ await loadBeautifyDeps(); depsLoaded = true; return true; }
       catch(e){
         const bnr = container.querySelector('#jb-err');
-        bnr.textContent = 'Could not load the formatting library from the CDN — check your internet connection and reload. ('+e.message+')';
+        bnr.textContent = 'Could not load the formatting library from the CDN: check your internet connection and reload. ('+e.message+')';
         bnr.classList.add('show');
         api.setStatus('Failed to load library', false);
         return false;
@@ -3832,7 +3913,7 @@ registerTool({
       const bnr = container.querySelector('#jb-err');
       try{
         const code = cmIn.getValue();
-        if (!code.trim()){ bnr.textContent='Nothing to beautify — paste some code first.'; bnr.classList.add('show'); return; }
+        if (!code.trim()){ bnr.textContent='Nothing to beautify: paste some code first.'; bnr.classList.add('show'); return; }
         const check = lang==='css' ? checkCssBraces(code) : checkJsSyntax(code);
         if (!check.ok){ bnr.textContent = `Invalid ${lang.toUpperCase()}: ${check.error}`; bnr.classList.add('show'); api.setStatus('Invalid input', false); return; }
         const out = lang==='css' ? css_beautify(code, {indent_size: STATE.indent}) : js_beautify(code, {indent_size: STATE.indent, preserve_newlines:true});
@@ -3845,9 +3926,9 @@ registerTool({
       const lang = container.querySelector('#jb-lang').value;
       const bnr = container.querySelector('#jb-err');
       const code = cmIn.getValue();
-      if (!code.trim()){ bnr.textContent='Nothing to minify — paste some code first.'; bnr.classList.add('show'); return; }
+      if (!code.trim()){ bnr.textContent='Nothing to minify: paste some code first.'; bnr.classList.add('show'); return; }
       if (lang==='css'){
-        // CSS is much safer to regex-minify than JS (no ASI / regex-literal ambiguity) — needs no external library
+        // CSS is much safer to regex-minify than JS (no ASI / regex-literal ambiguity): needs no external library
         const check = checkCssBraces(code);
         if (!check.ok){ bnr.textContent = 'Invalid CSS: '+check.error; bnr.classList.add('show'); api.setStatus('Invalid input', false); return; }
         try{
@@ -3866,7 +3947,7 @@ registerTool({
         cmOut.setValue(result.code||'');
         container.querySelector('#jb-stats').textContent = `${(result.code||'').length} chars (was ${code.length})`; container.querySelector('#jb-stats').className='pill ok';
         bnr.classList.remove('show'); api.setStatus('Minified', true);
-      }catch(e){ bnr.textContent = 'Minify error: '+(e.message||String(e)); bnr.classList.add('show'); api.setStatus('Syntax error — cannot minify', false); }
+      }catch(e){ bnr.textContent = 'Minify error: '+(e.message||String(e)); bnr.classList.add('show'); api.setStatus('Syntax error: cannot minify', false); }
     }
     container.querySelector('[data-a="beautify"]').addEventListener('click', beautify);
     container.querySelector('[data-a="minify"]').addEventListener('click', minify);
@@ -3882,7 +3963,7 @@ registerTool({
 
 /* =========================================================================
    TOOL: Basic Image Editor (resize, crop, rotate, flip, compress, export)
-   Pure canvas — no external libraries, no upload, everything local.
+   Pure canvas: no external libraries, no upload, everything local.
    ========================================================================= */
 registerTool({
   id:'image-editor-tool', name:'Image Editor', category:'Developer Utilities', icon:'\u25A3',
